@@ -16,3 +16,6 @@ onelogger.err
 runs/
 /test_cases/
 **/dist/
+benchmark_cache*
+*.sh
+tensorboard_logs/

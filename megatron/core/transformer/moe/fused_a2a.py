@@ -49,9 +49,13 @@ def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
         num_nvl_bytes = max(
             config.get_nvl_buffer_size_hint(hidden_bytes, group.size()), num_nvl_bytes
         )
-        num_rdma_bytes = max(
-            config.get_rdma_buffer_size_hint(hidden_bytes, group.size()), num_rdma_bytes
-        )
+        # NOTE: Compatible with the Hopper and previous architectures
+        if torch.cuda.is_available() and torch.cuda.get_device_properties(0).major == 9:
+            num_rdma_bytes = max(
+                config.get_rdma_buffer_size_hint(hidden_bytes, group.size()), num_rdma_bytes
+            )
+        else:
+            num_rdma_bytes = 0
 
     # Allocate buffer if not existed or not enough buffer
     # NOTES: the adaptive routing configuration of the network **must be off**

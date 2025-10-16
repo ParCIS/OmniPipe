@@ -127,6 +127,11 @@ _INTRA_DISTRIBUTED_OPTIMIZER_INSTANCE_GROUP = None
 # Memory buffers to avoid dynamic memory allocation
 _GLOBAL_MEMORY_BUFFER = None
 
+# chimera virtual data parallel size
+_VIRTUAL_DATA_PARALLEL_SIZE = None
+
+# chimera virtual data parallel rank
+_VIRTUAL_DATA_PARALLEL_RANK = None
 
 def get_nccl_options(pg_name, nccl_comm_cfgs):
     """Set the NCCL process group options.
@@ -1479,8 +1484,21 @@ def is_pipeline_first_stage(ignore_virtual=True, vp_stage=None):
     if not ignore_virtual and get_virtual_pipeline_model_parallel_world_size() is not None:
         assert vp_stage is not None, "vp_stage must be passed if virtual pipeline is enabled"
 
-        if vp_stage != 0:
-            return False
+        if get_virtual_pipeline_model_parallel_world_size() is not None:
+            if vp_stage != 0:
+                return False
+    if get_virtual_data_parallel_world_size() is not None:
+        pp = get_pipeline_model_parallel_world_size()
+        vdp = get_virtual_data_parallel_world_size()
+        if vp_stage is None:
+            vp_stage = get_virtual_data_parallel_rank()
+        offset_unit = pp // vdp * 2
+        pp_rank = get_pipeline_model_parallel_rank()
+        if vp_stage < vdp // 2:
+            return pp_rank == offset_unit * vp_stage
+        else:
+            dual_vdp_rank = vp_stage - vdp // 2
+            return pp_rank ==  pp - 1 - offset_unit * dual_vdp_rank
     return get_pipeline_model_parallel_rank() == 0
 
 
@@ -1489,8 +1507,21 @@ def is_pipeline_last_stage(ignore_virtual=True, vp_stage=None):
     if not ignore_virtual and get_virtual_pipeline_model_parallel_world_size() is not None:
         assert vp_stage is not None, "vp_stage must be passed if virtual pipeline is enabled"
 
-        if vp_stage != (get_virtual_pipeline_model_parallel_world_size() - 1):
-            return False
+        if get_virtual_pipeline_model_parallel_world_size() is not None:
+            if vp_stage != (get_virtual_pipeline_model_parallel_world_size() - 1):
+                return False
+    if get_virtual_data_parallel_world_size() is not None:
+        pp = get_pipeline_model_parallel_world_size()
+        vdp = get_virtual_data_parallel_world_size()
+        if vp_stage is None:
+            vp_stage = get_virtual_data_parallel_rank()
+        offset_unit = pp // vdp * 2
+        pp_rank = get_pipeline_model_parallel_rank()
+        if vp_stage < vdp // 2:
+            return pp_rank == (offset_unit * vp_stage + pp - 1) % pp 
+        else:
+            dual_vdp_rank = vp_stage - vdp // 2
+            return pp_rank == (-offset_unit * dual_vdp_rank + pp) % pp
     return get_pipeline_model_parallel_rank() == (get_pipeline_model_parallel_world_size() - 1)
 
 
@@ -1900,6 +1931,20 @@ def get_all_ranks():
     ]
     return "_".join(map(lambda x: str(x or 0), ranks))
 
+# chimera 
+def get_virtual_data_parallel_world_size() -> int:
+    """Return the virtual data-parallel world size."""
+    global _VIRTUAL_DATA_PARALLEL_SIZE
+    return _VIRTUAL_DATA_PARALLEL_SIZE
+
+def get_virtual_data_parallel_rank():
+    """Return the virtual data-parallel rank."""
+    global _VIRTUAL_DATA_PARALLEL_RANK
+    return _VIRTUAL_DATA_PARALLEL_RANK
+def set_virtual_data_parallel_rank(rank):
+    """Set the virtual data-parallel rank."""
+    global _VIRTUAL_DATA_PARALLEL_RANK
+    _VIRTUAL_DATA_PARALLEL_RANK = rank
 
 def destroy_model_parallel():
     """Set the groups to none."""

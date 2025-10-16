@@ -661,11 +661,15 @@ def pretrain(
     # Data stuff.
     app_metrics['app_build_dataiters_start_time'] = one_logger_utils.get_timestamp_in_ms()
     timers('train/valid/test-data-iterators-setup', log_level=0).start(barrier=True)
-    if args.virtual_pipeline_model_parallel_size is not None:
+    if (args.virtual_pipeline_model_parallel_size is not None or args.virtual_data_parallel_size is not None):
         train_data_iterator = []
         valid_data_iterator = []
         test_data_iterator = []
         for i in range(len(model)):
+            if args.virtual_pipeline_model_parallel_size is not None:
+                mpu.set_virtual_pipeline_model_parallel_rank(i)
+            elif args.virtual_data_parallel_size is not None:
+                mpu.set_virtual_data_parallel_rank(i)
             iterators = build_train_valid_test_data_iterators(train_valid_test_dataset_provider)
             train_data_iterator.append(iterators[0])
             valid_data_iterator.append(iterators[1])
@@ -826,15 +830,18 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     """Build the model."""
     args = get_args()
     args.model_type = model_type
-
+    if getattr(args, "virtual_data_parallel_size", None) is not None:
+        from megatron.core.pipeline_parallel.chimera import init_chimera_parallel_state
+        init_chimera_parallel_state()
     # Build model.
     def build_model():
         if (
             mpu.get_pipeline_model_parallel_world_size() > 1
-            and args.virtual_pipeline_model_parallel_size is not None
+            and (args.virtual_pipeline_model_parallel_size is not None or args.virtual_data_parallel_size is not None)
         ):
             model = []
-            for i in range(args.virtual_pipeline_model_parallel_size):
+            vp_world_size = args.virtual_pipeline_model_parallel_size or args.virtual_data_parallel_size
+            for i in range(vp_world_size):
                 # Set pre_process and post_process only after virtual rank is set.
                 pre_process = mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=i)
                 post_process = mpu.is_pipeline_last_stage(ignore_virtual=False, vp_stage=i)
@@ -961,8 +968,9 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                     module=model_chunk,
                     # Turn off bucketing for model_chunk 2 onwards, since communication for these
                     # model chunks is overlapped with compute anyway.
-                    disable_bucketing=(model_chunk_idx > 0)
-                    or args.overlap_param_gather_with_optimizer_step,
+                    disable_bucketing=((model_chunk_idx > 0)
+                    or args.overlap_param_gather_with_optimizer_step)
+                    and args.virtual_data_parallel_size is not None
                 )
                 for (model_chunk_idx, model_chunk) in enumerate(model)
             ]
@@ -2161,6 +2169,9 @@ def train(
         batch_size = (
             mpu.get_data_parallel_world_size() * args.micro_batch_size * get_num_microbatches()
         )
+        virtual_data_parallel_size = mpu.get_virtual_data_parallel_world_size()
+        if virtual_data_parallel_size is not None:
+            batch_size = batch_size // virtual_data_parallel_size
         args.consumed_train_samples += batch_size
         num_skipped_samples_in_batch = (
             get_current_global_batch_size() - get_current_running_global_batch_size()

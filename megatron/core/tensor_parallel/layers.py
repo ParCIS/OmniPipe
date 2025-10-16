@@ -40,6 +40,7 @@ from .mappings import (
 )
 from .random import get_cuda_rng_tracker, get_expert_parallel_rng_tracker_name
 from .utils import VocabUtility
+from .weight_grad_store import WeightGradStore
 
 _grad_accum_fusion_available = True
 try:
@@ -504,7 +505,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                 wgrad_compute = False
 
         if wgrad_compute:
-            if ctx.sequence_parallel:
+            if ctx.sequence_parallel and not WeightGradStore.enabled_decouple_dw:
                 dim_size = list(input.size())
                 dim_size[0] = dim_size[0] * tp_group.size()
 
@@ -522,11 +523,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                 total_input = input
         grad_input = grad_output.matmul(weight)
 
-        if ctx.sequence_parallel and wgrad_compute:
+        if ctx.sequence_parallel and wgrad_compute and not WeightGradStore.enabled_decouple_dw:
             # pylint: disable=possibly-used-before-assignment
             handle.wait()
 
-        if wgrad_compute:
+        if wgrad_compute and not WeightGradStore.enabled_decouple_dw:
             grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
                 grad_output, total_input
             )
@@ -549,61 +550,71 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             )
             # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
             # reduce scatter is scheduled before the weight gradient computation
-
-        if ctx.gradient_accumulation_fusion:
+        if WeightGradStore.enabled_decouple_dw:
             if wgrad_compute:
-                # In case of Megatron-FSDP, need to create main grad buffers in-place
-                if hasattr(weight, "__fsdp_param__"):
-                    weight.main_grad = weight.get_main_grad()
-                    torch.matmul(grad_output.t(), total_input, out=weight.main_grad)
-                else:
-                    if weight.main_grad.dtype == torch.float32:
-                        fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
-                            total_input, grad_output, weight.main_grad
-                        )
-                    elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
-                        fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16(
-                            total_input, grad_output, weight.main_grad
-                        )
-                    else:
-                        raise RuntimeError(
-                            "Unsupported gradient type for gradient accumulation fusion"
-                        )
-
-            if hasattr(weight, "grad_added_to_main_grad"):
-                # When overlap_grad_reduce is True, need to ensure that backward hooks
-                # are all run on the main backprop thread to prevent deadlocks. Setup
-                # dummy grad_weight tensor to prevent backward hooks from being run
-                # in a background thread.
-                if getattr(weight, "zero_out_wgrad", False):
-                    if HAVE_TE:
-                        # get_dummy_wgrad function in TE enables reuse of single dummy wgrad buffer
-                        # across different layers/microbatches. The function accepts shape as list.
-                        grad_weight = get_dummy_wgrad(
-                            list(weight.main_grad.shape), input.dtype, zero=True
-                        )
-                    else:
-                        grad_weight = torch.zeros(
-                            weight.main_grad.shape,
-                            dtype=input.dtype,
-                            device=torch.cuda.current_device(),
-                            requires_grad=False,
-                        )
-                else:
-                    if HAVE_TE:
-                        grad_weight = get_dummy_wgrad(list(weight.main_grad.shape), input.dtype)
-                    else:
-                        grad_weight = torch.empty(
-                            weight.main_grad.shape,
-                            dtype=input.dtype,
-                            device=torch.cuda.current_device(),
-                            requires_grad=False,
-                        )
-                weight.grad_added_to_main_grad = True
-            else:
-                grad_weight = None
+                WeightGradStore.put(
+                    total_input.clone().detach(),
+                    grad_output.clone().detach(),
+                    weight,
+                    ctx.sequence_parallel,
+                )
+            weight.skip_grad_accum = True
+            grad_weight = None
         else:
-            grad_weight = grad_output.t().matmul(total_input)
+            if ctx.gradient_accumulation_fusion:
+                if wgrad_compute:
+                    # In case of Megatron-FSDP, need to create main grad buffers in-place
+                    if hasattr(weight, "__fsdp_param__"):
+                        weight.main_grad = weight.get_main_grad()
+                        torch.matmul(grad_output.t(), total_input, out=weight.main_grad)
+                    else:
+                        if weight.main_grad.dtype == torch.float32:
+                            fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
+                                total_input, grad_output, weight.main_grad
+                            )
+                        elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
+                            fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16(
+                                total_input, grad_output, weight.main_grad
+                            )
+                        else:
+                            raise RuntimeError(
+                                "Unsupported gradient type for gradient accumulation fusion"
+                            )
+
+                if hasattr(weight, "grad_added_to_main_grad"):
+                    # When overlap_grad_reduce is True, need to ensure that backward hooks
+                    # are all run on the main backprop thread to prevent deadlocks. Setup
+                    # dummy grad_weight tensor to prevent backward hooks from being run
+                    # in a background thread.
+                    if getattr(weight, "zero_out_wgrad", False):
+                        if HAVE_TE:
+                            # get_dummy_wgrad function in TE enables reuse of single dummy wgrad buffer
+                            # across different layers/microbatches. The function accepts shape as list.
+                            grad_weight = get_dummy_wgrad(
+                                list(weight.main_grad.shape), input.dtype, zero=True
+                            )
+                        else:
+                            grad_weight = torch.zeros(
+                                weight.main_grad.shape,
+                                dtype=input.dtype,
+                                device=torch.cuda.current_device(),
+                                requires_grad=False,
+                            )
+                    else:
+                        if HAVE_TE:
+                            grad_weight = get_dummy_wgrad(list(weight.main_grad.shape), input.dtype)
+                        else:
+                            grad_weight = torch.empty(
+                                weight.main_grad.shape,
+                                dtype=input.dtype,
+                                device=torch.cuda.current_device(),
+                                requires_grad=False,
+                            )
+                    weight.grad_added_to_main_grad = True
+                else:
+                    grad_weight = None
+            else:
+                grad_weight = grad_output.t().matmul(total_input)
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
         if ctx.sequence_parallel:

@@ -125,6 +125,10 @@ def get_forward_backward_func():
     if pipeline_model_parallel_size > 1:
         if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
             forward_backward_func = forward_backward_pipelining_with_interleaving
+        elif parallel_state.get_virtual_data_parallel_world_size() is not None:
+            # Chimera, import here to avoid circle import.
+            from megatron.core.pipeline_parallel.chimera import get_chimera_forward_backward_func
+            forward_backward_func = get_chimera_forward_backward_func()
         else:
             forward_backward_func = forward_backward_pipelining_without_interleaving
     else:
