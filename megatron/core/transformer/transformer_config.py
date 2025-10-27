@@ -1297,11 +1297,11 @@ class TransformerConfig(ModelParallelConfig):
 
         if self.overlap_moe_expert_parallel_comm:
             # TODO: remove this after we fix the hang issue with torch version < 2.6.0
-            assert is_torch_min_version(
-                "2.6.0"
-            ), "A2A Overlap encounters hang issue with torch version < 2.6.0"
+            # assert is_torch_min_version(
+            #     "2.6.0"
+            # ), "A2A Overlap encounters hang issue with torch version < 2.6.0"
             if self.pipeline_model_parallel_size > 1:
-                assert self.virtual_pipeline_model_parallel_size is not None, (
+                assert (self.virtual_pipeline_model_parallel_size is not None or self.virtual_data_parallel_size is not None), (
                     "If enabling EP A2A overlap, virtual_pipeline_model_parallel_size "
                     "must be specified when pipeline_model_parallel_size > 1"
                 )
@@ -1338,9 +1338,9 @@ class TransformerConfig(ModelParallelConfig):
 
         # Check delay_wgrad_compute compatibility
         if self.delay_wgrad_compute:
-            assert (
-                self.overlap_moe_expert_parallel_comm
-            ), 'overlap_moe_expert_parallel_comm must be enabled when enabling delay_wgrad_compute'
+            # assert (
+            #     self.overlap_moe_expert_parallel_comm
+            # ), 'overlap_moe_expert_parallel_comm must be enabled when enabling delay_wgrad_compute'
             assert (
                 not self.moe_use_legacy_grouped_gemm
             ), 'delay_wgrad_compute is not supported with legacy groupedgemm implementation'

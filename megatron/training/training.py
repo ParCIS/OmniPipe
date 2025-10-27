@@ -968,9 +968,9 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                     module=model_chunk,
                     # Turn off bucketing for model_chunk 2 onwards, since communication for these
                     # model chunks is overlapped with compute anyway.
-                    disable_bucketing=((model_chunk_idx > 0)
-                    or args.overlap_param_gather_with_optimizer_step)
-                    and args.virtual_data_parallel_size is not None
+                    disable_bucketing=(model_chunk_idx > 0)
+                    or args.overlap_param_gather_with_optimizer_step
+                    or args.virtual_data_parallel_size is not None
                 )
                 for (model_chunk_idx, model_chunk) in enumerate(model)
             ]
@@ -979,7 +979,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         if args.data_parallel_random_init:
             for model_module in model:
                 model_module.broadcast_params()
-
+    print(f"[rank{torch.distributed.get_rank()}]: {model}, num_parameters  = {num_parameters}", flush=True)
     return model
 
 

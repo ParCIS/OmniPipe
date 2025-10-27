@@ -204,12 +204,13 @@ class TransformerLayerSchedulePlan:
                 f_input = f_layer.attn.forward(f_input)
                 f_input = f_layer.post_attn.forward(f_input)
 
-        if b_layer is not None:
-            b_grad = b_layer.mlp.backward(b_grad)
 
         if f_layer is not None:
             with f_layer.get_fp8_context():
                 f_input = f_layer.moe_dispatch.forward(f_input)
+
+        if b_layer is not None:
+            b_grad = b_layer.mlp.backward(b_grad)
 
         if b_layer is not None:
             b_layer.mlp.backward_dw()

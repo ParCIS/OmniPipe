@@ -19,3 +19,4 @@ runs/
 benchmark_cache*
 *.sh
 tensorboard_logs/
+.nfs*

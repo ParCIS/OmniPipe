@@ -167,6 +167,7 @@ def init_chimera_parallel_state():
                 parallel_state._EMBEDDING_GROUP = embedding_group
                 parallel_state._EMBEDDING_GLOBAL_RANKS = embedding_ranks
     parallel_state._VIRTUAL_DATA_PARALLEL_SIZE = vdp
+    args.expert_model_parallel_size = ep * vdp
         
 
 CHIMERA_SCHEDULER = None
