@@ -544,7 +544,7 @@ class ChimeraScheduler():
             self._forward_with_comm(vdp_rank1, pre_forward=self.commit_wrapper, post_forward=F1_post_forward)
             if not is_middle_rank:
                 self._send_forward(vdp_rank=vdp_rank0)
-        
+
         # Step 3: nB1W1F1
         B1F1_nodes = self.schedule["B1F1"]
         for i in range(0, len(B1F1_nodes), 2):
@@ -622,7 +622,6 @@ class ChimeraScheduler():
             F1_post_forward = self._cat_comm_for_combine_chimera(F1_post_forward, no_op)
             B0_post_backward = self._cat_comm_for_combine_chimera(B0_post_backward, self.wgrad_compute_and_p2p_commit_helper(B0_node.virtual_data_parallel_rank, commit=(i + 4 < len(F0B1F1F0_nodes))))
             self._forward_backward_with_comm(F1_node.virtual_data_parallel_rank, B0_node.virtual_data_parallel_rank, pre_forward=self.commit_wrapper, post_forward=F1_post_forward, pre_backward=None, post_backward=B0_post_backward)
-        
         # Step 5: n partial F0B1F1B0
         partial_F0B1F1B0_nodes = self.schedule["Partial_F0B1F1B0"]
         for i in range(0, len(partial_F0B1F1B0_nodes), 2):
@@ -655,23 +654,15 @@ class ChimeraScheduler():
             if F_node.is_idle():
                 if i == 0:
                     self._recv_backward(vdp_rank=B_node.virtual_data_parallel_rank)
-                    B_pre_backward = self.commit_wrapper
-                else:
-                    B_pre_backward = self.commit_wrapper
+                B_pre_backward = self.commit_wrapper
                 # print(f"[rank {self.rank}]: checkpoint 1, pre_backward = {B_pre_backward}, post_backward = {FB_post_backward_func_list}")
                 self._backward_with_comm(B_node.virtual_data_parallel_rank, pre_backward=B_pre_backward, post_backward=self._cat_comm_for_combine_chimera(FB_post_backward_func_list, self.wgrad_compute_and_p2p_commit_helper(B_node.virtual_data_parallel_rank, commit=(i + 2 < len(partial_F0B1F1B0_nodes)))))
             else:
                 # prepare pre_forward of FB_node
                 if i == 0:
-                    FB_pre_forward = self._cat_comm_for_combine_chimera(
-                        [
-                            partial(self._recv_forward, vdp_rank=F_node.virtual_data_parallel_rank),
-                            partial(self._recv_backward, vdp_rank=B_node.virtual_data_parallel_rank)
-                        ],
-                        self.commit_wrapper
-                    )
-                else:
-                    FB_pre_forward = self.commit_wrapper
+                    self._recv_forward(vdp_rank=F_node.virtual_data_parallel_rank)
+                    self._recv_backward(vdp_rank=B_node.virtual_data_parallel_rank)
+                FB_pre_forward = self.commit_wrapper
                 # print(f"[rank {self.rank}]: checkpoint 2")
                 F_post_forward = self._cat_comm_for_combine_chimera([partial(self._send_forward, vdp_rank=F_node.virtual_data_parallel_rank)], no_op)
                 self._forward_backward_with_comm(F_node.virtual_data_parallel_rank, B_node.virtual_data_parallel_rank, pre_forward=FB_pre_forward, post_forward=F_post_forward, pre_backward=None, post_backward=self._cat_comm_for_combine_chimera(FB_post_backward_func_list, self.wgrad_compute_and_p2p_commit_helper(B_node.virtual_data_parallel_rank, commit=(i + 2 < len(partial_F0B1F1B0_nodes)))))
@@ -750,7 +741,7 @@ class ChimeraScheduler():
                 next_B_node = single_B_nodes[i + 1]
             else:
                 next_B_node = None
-            # [send_B, recv_next_B, wgrad_and_p2p_overlap]
+            # [send_B, recv_next_B]
             B_post_backward_func_list = [None for _ in range(2)]
             B_post_backward_func_list[0] = partial(self._send_backward, vdp_rank=node.virtual_data_parallel_rank)
             if next_B_node is None:

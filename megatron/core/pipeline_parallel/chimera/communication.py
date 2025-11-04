@@ -115,3 +115,4 @@ class CommunicationManager:
     def reset(self):
         self.p2p_ops: List[dist.P2POp] = []
         self.to_free: List[torch.Tensor] = []
+        self.comm_info_for_debug = []
