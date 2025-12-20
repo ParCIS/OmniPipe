@@ -81,13 +81,13 @@ def make_viewless(e):
 
 
 @contextmanager
-def stream_acquire_context(stream, wait_event, record_event):
+def stream_acquire_context(stream, event):
     """Stream acquire context"""
-    wait_event.wait(stream)
+    event.wait(stream)
     try:
         yield
     finally:
-        record_event.record(stream)
+        event.record(stream)
 
 
 class NoopScheduleNode:
@@ -145,9 +145,7 @@ class ScheduleNode:
         self.forward_func = forward_func
         self.backward_func = backward_func if backward_func else self.default_backward_func
         self.stream = stream
-        # self.event = event
-        self.wait_event = event[0]
-        self.record_event = event[1]
+        self.event = event
         self.free_input = free_input
         self.inputs = None
         self.outputs = None
@@ -172,7 +170,7 @@ class ScheduleNode:
         return self._forward(*inputs)
 
     def _forward(self, *inputs):
-        with stream_acquire_context(self.stream, self.wait_event, self.record_event):
+        with stream_acquire_context(self.stream, self.event):
             torch.cuda.nvtx.range_push(f"{self.name} forward")
             with torch.cuda.stream(self.stream):
                 self.inputs = [make_viewless(e).detach() if e is not None else None for e in inputs]
@@ -214,7 +212,7 @@ class ScheduleNode:
         return self._backward(*output_grad)
 
     def _backward(self, *output_grad):
-        with stream_acquire_context(self.stream, self.wait_event, self.record_event):
+        with stream_acquire_context(self.stream, self.event):
             torch.cuda.nvtx.range_push(f"{self.name} backward")
             with torch.cuda.stream(self.stream):
                 outputs = self.output

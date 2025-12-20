@@ -129,30 +129,33 @@ def init_chimera_parallel_state():
                 parallel_state._DATA_PARALLEL_GROUP_WITH_CP = new_dp_cp_group
                 # no use, just to be compatible with mcore
                 parallel_state._INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP = new_dp_cp_group
-        # construct new ep groups
-        for i in range(num_ep_group_per_stage):
-            new_ep_ranks = []
-            for pp_r in pp_ranks:
-                new_ep_ranks.extend(ep_ranks_list[pp_r * num_ep_group_per_stage + i])
-            new_ep_group = create_group(new_ep_ranks, timeout=timeout, pg_options=get_nccl_options("ep", nccl_comm_cfgs))
-            if global_rank in new_ep_ranks:
-                parallel_state._EXPERT_MODEL_PARALLEL_GROUP = new_ep_group
-        # construct new ep-tp groups
-        for i in range(num_ep_tp_group_per_stage):
-            new_ep_tp_ranks = []
-            for pp_r in pp_ranks:
-                new_ep_tp_ranks.extend(ep_tp_ranks_list[pp_r * num_ep_tp_group_per_stage + i])
-            new_ep_tp_group = create_group(new_ep_tp_ranks, timeout=timeout, pg_options=get_nccl_options("ep-tp-mp", nccl_comm_cfgs))
-            if global_rank in new_ep_tp_ranks:
-                parallel_state._EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP = new_ep_tp_group
-        # construct new ep-dp groups
-        for i in range(num_edp_group_per_stage):
-            new_ep_dp_ranks = []
-            for pp_r in pp_ranks:
-                new_ep_dp_ranks.extend(edp_ranks_list[pp_r * num_edp_group_per_stage + i])
-            new_ep_dp_group = create_group(new_ep_dp_ranks, timeout=timeout, pg_options=get_nccl_options("ep-dp", nccl_comm_cfgs))
-            if global_rank in new_ep_dp_ranks:
-                parallel_state._EXPERT_DATA_PARALLEL_GROUP = new_ep_dp_group
+        if args.extend_vdp_to_ep:
+            # construct new ep groups
+            for i in range(num_ep_group_per_stage):
+                new_ep_ranks = []
+                for pp_r in pp_ranks:
+                    new_ep_ranks.extend(ep_ranks_list[pp_r * num_ep_group_per_stage + i])
+                new_ep_group = create_group(new_ep_ranks, timeout=timeout, pg_options=get_nccl_options("ep", nccl_comm_cfgs))
+                if global_rank in new_ep_ranks:
+                    parallel_state._EXPERT_MODEL_PARALLEL_GROUP = new_ep_group
+            # construct new ep-tp groups
+            for i in range(num_ep_tp_group_per_stage):
+                new_ep_tp_ranks = []
+                for pp_r in pp_ranks:
+                    new_ep_tp_ranks.extend(ep_tp_ranks_list[pp_r * num_ep_tp_group_per_stage + i])
+                new_ep_tp_group = create_group(new_ep_tp_ranks, timeout=timeout, pg_options=get_nccl_options("ep-tp-mp", nccl_comm_cfgs))
+                if global_rank in new_ep_tp_ranks:
+                    parallel_state._EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP = new_ep_tp_group
+            args.expert_model_parallel_size = ep * vdp
+        else:
+            # construct new ep-dp groups
+            for i in range(num_edp_group_per_stage):
+                new_ep_dp_ranks = []
+                for pp_r in pp_ranks:
+                    new_ep_dp_ranks.extend(edp_ranks_list[pp_r * num_edp_group_per_stage + i])
+                new_ep_dp_group = create_group(new_ep_dp_ranks, timeout=timeout, pg_options=get_nccl_options("ep-dp", nccl_comm_cfgs))
+                if global_rank in new_ep_dp_ranks:
+                    parallel_state._EXPERT_DATA_PARALLEL_GROUP = new_ep_dp_group
         
     # construct embedding groups
     for vdp_rank in range(vdp // 2):
@@ -167,8 +170,120 @@ def init_chimera_parallel_state():
                 parallel_state._EMBEDDING_GROUP = embedding_group
                 parallel_state._EMBEDDING_GLOBAL_RANKS = embedding_ranks
     parallel_state._VIRTUAL_DATA_PARALLEL_SIZE = vdp
-    args.expert_model_parallel_size = ep * vdp
-        
+    args.delay_wgrad_compute = True
+    if global_rank == 0:
+        print(f">>> Set expert model parallel size to {ep * vdp}")
+
+    from megatron.core.models.common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan
+    TransformerModelChunkSchedulePlan.run = transformer_model_chunk_schedule_plan_run_patch
+
+
+def transformer_layer_schedule_plan_run_patch(f_layer, b_layer, f_input=None, b_grad=None):
+    """
+    Chimera is unlike to interleaved 1f1b. We delay the all backward_dw to get less bubble.
+    """
+    if b_layer is not None:
+            b_grad = b_layer.mtp_post_process.backward(b_grad)
+            b_grad = b_layer.moe_combine.backward(b_grad)
+
+    if f_layer is not None:
+        with f_layer.get_fp8_context():
+            f_input = f_layer.attn.forward(f_input)
+            f_input = f_layer.post_attn.forward(f_input)
+
+
+    if f_layer is not None:
+        with f_layer.get_fp8_context():
+            f_input = f_layer.moe_dispatch.forward(f_input)
+
+    if b_layer is not None:
+        b_grad = b_layer.mlp.backward(b_grad)
+
+    if b_layer is not None:
+        b_grad = b_layer.moe_dispatch.backward(b_grad)
+
+    if f_layer is not None:
+        with f_layer.get_fp8_context():
+            f_input = f_layer.mlp.forward(f_input)
+
+    if f_layer is not None:
+        with f_layer.get_fp8_context():
+            f_input = f_layer.moe_combine.forward(f_input)
+            f_input = f_layer.mtp_post_process.forward(f_input)
+
+    if b_layer is not None:
+        b_grad = b_layer.post_attn.backward(b_grad)
+        b_grad = b_layer.attn.backward(b_grad)
+
+    return f_input, b_grad
+
+
+def transformer_model_chunk_schedule_plan_run_patch(f_schedule_plan, b_schedule_plan, b_grad=None, *unused_args, **unused_kwargs):
+    from megatron.core.pipeline_parallel.utils import get_comm_stream
+    f_input = None
+    if f_schedule_plan:
+        f_schedule_plan.record_current_stream()
+        f_input = f_schedule_plan.pre_process.forward()
+
+    if b_schedule_plan:
+        b_schedule_plan.record_current_stream()
+        assert b_grad is not None
+
+        if b_schedule_plan.post_process is not None:
+            b_grad = b_schedule_plan.post_process.backward(b_grad)
+
+    f_num_layers = f_schedule_plan.num_layers() if f_schedule_plan is not None else 0
+    b_num_layers = b_schedule_plan.num_layers() if b_schedule_plan is not None else 0
+    overlapped_layers = min(f_num_layers, b_num_layers)
+
+    # combined forward and backward pass for overlapped layers
+    for i in range(overlapped_layers):
+        f_layer = f_schedule_plan.get_layer(i)
+        b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
+        torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
+        f_input, b_grad = transformer_layer_schedule_plan_run_patch(
+            f_layer,
+            b_layer,
+            f_input=f_input,
+            b_grad=b_grad,
+        )
+        torch.cuda.nvtx.range_pop()
+
+    # backward pass for the remaining layers
+    for i in range(overlapped_layers, b_num_layers):
+        b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
+        torch.cuda.nvtx.range_push(f"layer_{b_num_layers - 1 - i}b")
+        _, b_grad = transformer_layer_schedule_plan_run_patch(
+            None, b_layer, b_grad=b_grad
+        )
+        torch.cuda.nvtx.range_pop()
+
+    # forward pass for the remaining layers
+    for i in range(overlapped_layers, f_num_layers):
+        f_layer = f_schedule_plan.get_layer(i)
+        torch.cuda.nvtx.range_push(f"layer_{i}f")
+        f_input, _ = transformer_layer_schedule_plan_run_patch(f_layer, None, f_input=f_input)
+        torch.cuda.nvtx.range_pop()
+    # post process forward
+    if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
+        f_input = f_schedule_plan.post_process.forward(f_input)
+
+    # pre process backward
+    if b_schedule_plan is not None:
+        b_schedule_plan.pre_process.backward(b_grad)
+
+    if f_schedule_plan:
+        f_schedule_plan.wait_current_stream()
+
+    if b_schedule_plan:
+        b_schedule_plan.wait_current_stream()
+
+
+    # Release reference as early as possible, this helps avoid memory leak.
+    if b_schedule_plan is not None:
+        b_schedule_plan.release_state()
+
+    return f_input
 
 CHIMERA_SCHEDULER = None
 def get_chimera_forward_backward_func():

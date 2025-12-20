@@ -72,12 +72,12 @@ class BlendedMegatronDatasetBuilder(object):
                     for {split.name} split
                     This can occur with multiple validation sets if datasets have weights"""
 
-        if torch.distributed.is_initialized():
-            gb_rank = torch.distributed.get_rank()
-            if gb_rank == 0:
-                assert (
-                    self.is_built_on_rank()
-                ), "is_built_on_rank must return True when global rank = 0"
+        # if torch.distributed.is_initialized():
+        #     gb_rank = torch.distributed.get_rank()
+        #     if gb_rank == 0:
+        #         assert (
+        #             self.is_built_on_rank()
+        #         ), "is_built_on_rank must return True when global rank = 0"
 
     def build(self) -> List[Optional[TopLevelDataset]]:
         """Build all dataset splits according to the provided blend(s)

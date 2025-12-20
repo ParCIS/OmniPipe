@@ -18,7 +18,8 @@ from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 from .log_handler import CustomHandler
 
 # Make default logging level INFO, but filter out all log messages not from MCore.
-logging.basicConfig(handlers=[CustomHandler()], level=logging.INFO)
+log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(handlers=[CustomHandler()], level=log_level)
 from .theoretical_memory_usage import report_theoretical_memory
 import time
 
@@ -831,8 +832,13 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     args = get_args()
     args.model_type = model_type
     if getattr(args, "virtual_data_parallel_size", None) is not None:
-        from megatron.core.pipeline_parallel.chimera import init_chimera_parallel_state
-        init_chimera_parallel_state()
+        multi_pipeline_type = args.multi_pipeline_type
+        if multi_pipeline_type == "dualpipe":
+            from megatron.core.pipeline_parallel.dualpipe import init_dualpipe_parallel_state
+            init_dualpipe_parallel_state()
+        else:
+            from megatron.core.pipeline_parallel.chimera import init_chimera_parallel_state
+            init_chimera_parallel_state()
     # Build model.
     def build_model():
         if (
@@ -960,6 +966,12 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             if not ddp_config.overlap_grad_reduce:
                 ddp_config.bucket_size = None
 
+        if args.overlap_param_gather_with_optimizer_step:
+            disable_bucketing = [True] * len(model)
+        elif args.virtual_data_parallel_size is not None:
+            disable_bucketing = [True] * (len(model) - 1) + [False]
+        else:
+            disable_bucketing = [False] + [True] * (len(model) - 1)
         with torch.cuda.stream(torch.cuda.Stream()):
             model = [
                 DP(
@@ -1560,8 +1572,9 @@ def training_log(
             mpu.is_pipeline_first_stage(ignore_virtual=True)
             or mpu.is_pipeline_last_stage(ignore_virtual=True)
         ):
-            assert decoupled_learning_rate is not None
-            log_string += f' decoupled learning rate: {decoupled_learning_rate:.6E} |'
+            # assert decoupled_learning_rate is not None
+            if decoupled_learning_rate is not None:
+                log_string += f' decoupled learning rate: {decoupled_learning_rate:.6E} |'
         else:
             assert decoupled_learning_rate is None
         log_string += f' global batch size: {batch_size:5d} |'
@@ -1588,6 +1601,7 @@ def training_log(
         total_loss_dict[skipped_iters_key] = 0
         total_loss_dict[nan_iters_key] = 0
         print_rank_last(log_string)
+        report_memory_flag = iteration % 5 == 0
         if report_memory_flag:
             # Report memory after optimizer state has been initialized.
             if torch.distributed.get_rank() == 0:

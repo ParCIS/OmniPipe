@@ -544,14 +544,15 @@ def validate_args(args, defaults={}):
                 'pipeline-model-parallel size should be greater than 2 to avoid having multiple '\
                 'p2p sends and recvs between same 2 ranks per communication batch'
     else:
-        # Overlap P2P communication is disabled if not using the interleaved schedule.
+        # Overlap P2P communication is disabled if not using the interleaved schedule or multiple pipeline schedule.
         args.overlap_p2p_comm = False
-        args.align_param_gather = False
-        # Only print warning if PP size > 1.
-        if args.rank == 0 and args.pipeline_model_parallel_size > 1:
-            print('WARNING: Setting args.overlap_p2p_comm and args.align_param_gather to False '
-                'since non-interleaved schedule does not support overlapping p2p communication '
-                'and aligned param AG')
+        if args.virtual_data_parallel_size is None:
+            args.align_param_gather = False
+            # Only print warning if PP size > 1.
+            if args.rank == 0 and args.pipeline_model_parallel_size > 1:
+                print('WARNING: Setting args.overlap_p2p_comm and args.align_param_gather to False '
+                    'since non-interleaved schedule does not support overlapping p2p communication '
+                    'and aligned param AG')
 
     if args.rank == 0:
         print(f"Number of virtual stages per pipeline stage: {args.virtual_pipeline_model_parallel_size}")
@@ -2321,6 +2322,10 @@ def _add_distributed_args(parser):
                        help='Degree of pipeline model parallelism.')
     group.add_argument('--virtual-data-parallel-size', type=int, default=None,
                        help='Degree of multiple pipeline.')
+    group.add_argument('--extend-vdp-to-ep', action="store_true", default=False,
+                       help="extend multipipe to expert parallel to reduce memory usage")
+    group.add_argument('--multi-pipeline-type', type=str, default="chimera", choices=['chimera', 'dualpipe'],
+                       help="Multi-pipeline type, choice in [chimera, dualpipe]")
     group.add_argument('--decoder-first-pipeline-num-layers',
                        type=int, default=None,
                        help=('The number of transformer layers on the first pipeline stage of the decoder. '

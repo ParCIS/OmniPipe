@@ -114,7 +114,7 @@ class TransformerLayerSchedulePlan:
         extra_args["is_mtp"] = is_mtp
 
         # wrapper to help create TransformerLayerNode
-        def create_node(stream, module, name, event):
+        def create_node(stream, module, name):
             bwd_dw_callables = bwd_dw_callable_map.get(name, None)
             return TransformerLayerNode(
                 stream,
@@ -138,12 +138,12 @@ class TransformerLayerSchedulePlan:
 
         # Create nodes for different operations in the layer
         # Each node type has a predefined name that determines its memory strategy
-        self.attn = create_node(comp_stream, attn_module, "attn", event)
-        self.mlp = create_node(comp_stream, mlp_module, "mlp", event)
+        self.attn = create_node(comp_stream, attn_module, "attn")
+        self.mlp = create_node(comp_stream, mlp_module, "mlp")
         if is_moe:
-            self.post_attn = create_node(comp_stream, post_attn_module, "post_attn", event)
-            self.moe_dispatch = create_node(comm_stream, moe_dispatch_module, "moe_dispatch", (event[1], event[0]))
-            self.moe_combine = create_node(comm_stream, moe_combine_module, "moe_combine", (event[1], event[0]))
+            self.post_attn = create_node(comp_stream, post_attn_module, "post_attn")
+            self.moe_dispatch = create_node(comm_stream, moe_dispatch_module, "moe_dispatch")
+            self.moe_combine = create_node(comm_stream, moe_combine_module, "moe_combine")
         else:
             self.post_attn = NoopScheduleNode()
             self.moe_dispatch = NoopScheduleNode()
@@ -289,16 +289,14 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
 
         self._model_chunk_state = ModelChunkState()
         self._transformer_layers = []
-        self.comm_event = torch.cuda.Event()
-        self.comp_event = torch.cuda.Event()
-        self._event = (self.comm_event, self.comp_event)
+        self._event = torch.cuda.Event()
         self.pre_process = None
         self.post_process = None
         self.vp_stage = model.vp_stage
 
         comp_stream = get_comp_stream()
         comm_stream = get_comm_stream()
-        self.comm_event.record(comp_stream)
+
 
         # save the inputs of model.forward() to ModelChunkState
         self._model_chunk_state.input_ids = input_ids
@@ -355,22 +353,12 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
     def record_current_stream(self):
         """Records the current CUDA stream in the event."""
         stream = torch.cuda.current_stream()
-        if stream == get_comm_stream():
-            self.comm_event.record(stream)
-        elif stream == get_comp_stream():
-            self.comp_event.record(stream)
-        else:
-            raise RuntimeError(f"Unknown stream to record")
+        self._event.record(stream)
 
     def wait_current_stream(self):
         """Waits for the event to complete on the current CUDA stream."""
         stream = torch.cuda.current_stream()
-        if stream == get_comm_stream():
-            self.comp_event.record(stream)
-        elif stream == get_comp_stream():
-            self.comm_event.record(stream)
-        else:
-            raise RuntimeError(f"Unknown stream to wait")
+        self._event.wait(stream)
 
     def get_layer(self, i):
         """Gets the transformer layer at the specified index."""

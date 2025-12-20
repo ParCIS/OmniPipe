@@ -10,6 +10,7 @@ from megatron.core.enums import Fp8Recipe
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.pipeline_parallel.utils import AbstractSchedulePlan, ScheduleNode, set_streams
 from megatron.core.utils import get_attr_wrapped_model
+from megatron.core import parallel_state
 
 # Types
 Shape = Union[List[int], torch.Size]
@@ -247,6 +248,7 @@ def combined_forward_backward_step(
     b_output_tensor_grad,
     config,
     f_model_chunk_id=None,
+    b_model_chunk_id=None,
     pre_forward=None,
     pre_backward=None,
     post_forward=None,
@@ -310,6 +312,8 @@ def combined_forward_backward_step(
         context_manager = contextlib.nullcontext()
 
     # forward preprocess, the same as the forward_step()
+    if parallel_state.get_virtual_data_parallel_world_size() is not None:
+        parallel_state.set_virtual_data_parallel_rank(f_model_chunk_id)
     unwrap_output_tensor = False
     f_schedule_plan = None
     if f_model is not None:
@@ -347,6 +351,8 @@ def combined_forward_backward_step(
             ), "first output of forward_step_func must be one instance of AbstractSchedulePlan"
 
     # backward preprocess, the same as the backward_step()
+    if parallel_state.get_virtual_data_parallel_world_size() is not None:
+        parallel_state.set_virtual_data_parallel_rank(b_model_chunk_id)
     unwrap_input_tensor_grad = False
     b_schedule_plan = None
     if b_model is not None:

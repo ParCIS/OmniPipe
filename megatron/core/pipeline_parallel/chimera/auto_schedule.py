@@ -127,12 +127,14 @@ class ChimeraAutoSchedule:
 
         def F0():
             nodes = []
-            n = (self.pipeline_model_parallel_world_size // self.virtual_data_parallel_size - self.relative_rank - 1) * 2
+            n = self.pipeline_model_parallel_world_size // self.virtual_data_parallel_size - self.relative_rank - 1
+            if self.num_microbatches >= 2 * self.pipeline_model_parallel_world_size - self.virtual_data_parallel_size:
+                n *= 2
             # maybe there is a case that n > num_microbatches
-            n_F_down_F_up = self.pipeline_model_parallel_world_size // 2 - (self.pipeline_model_parallel_world_size // self.virtual_data_parallel_size - 1 - self.relative_rank)
-            if num_microbatches_per_vdp * 2 - n < n_F_down_F_up:
-                # reserve microbatch for F_down_F_up
-                n = num_microbatches_per_vdp * 2 - n_F_down_F_up
+            # n_F_down_F_up = self.pipeline_model_parallel_world_size // 2 - (self.pipeline_model_parallel_world_size // self.virtual_data_parallel_size - 1 - self.relative_rank)
+            # if num_microbatches_per_vdp * 2 - n < n_F_down_F_up:
+            #     # reserve microbatch for F_down_F_up
+            #     n = num_microbatches_per_vdp * 2 - n_F_down_F_up
             for i in range(n):
                 nodes.append(ChimeraNode(ChimeraNodeType.FORWARD, virtual_data_parallel_rank=0))
                 F_counts[0] -= 1
@@ -146,7 +148,11 @@ class ChimeraAutoSchedule:
             """
             nodes = []
             # n = (self.pipeline_model_parallel_world_size - n_F) // 2
-            n = self.pipeline_model_parallel_world_size // 2 - (self.pipeline_model_parallel_world_size // self.virtual_data_parallel_size - 1 - self.relative_rank)
+            if self.num_microbatches < 2 * self.pipeline_model_parallel_world_size - self.virtual_data_parallel_size:
+                n_F = n_F * 2
+            n = (self.pipeline_model_parallel_world_size - n_F) // 2
+
+            # n = self.pipeline_model_parallel_world_size // 2 - (self.pipeline_model_parallel_world_size // self.virtual_data_parallel_size - 1 - self.relative_rank)
 
             micro_per_vdp = self.pipeline_model_parallel_world_size // self.virtual_data_parallel_size
             down_count = micro_per_vdp - self.relative_rank - 1
@@ -333,7 +339,7 @@ if __name__ == "__main__":
     world_size = 8
     pipeline_model_parallel_world_size = 8
     virtual_data_parallel_size = 4
-    num_microbatches = 20
+    num_microbatches = 12
     for rank in range(world_size):
         print("=" * 150)
         ChimeraNode.forward_microbatch_count = {}

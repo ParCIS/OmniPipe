@@ -513,20 +513,18 @@ class DistributedDataParallel(_BaseDataParallel):
 
             if param in self.param_to_bucket_group:
                 assert param.requires_grad
-                if not getattr(param, "skip_grad_accum", False):
-                    if self.ddp_config.overlap_grad_reduce:
-                        assert (
-                            param.grad is not None
-                        ), 'param.grad being None is not safe when overlap_grad_reduce is True'
-                    if param.grad is not None and (
-                        not param.grad_added_to_main_grad or getattr(param, 'zero_out_wgrad', False)
-                    ):
-                        param.main_grad.add_(param.grad.data)
-                    param.grad = None
+                if self.ddp_config.overlap_grad_reduce:
+                    assert (
+                        param.grad is not None
+                    ), 'param.grad being None is not safe when overlap_grad_reduce is True'
+                if param.grad is not None and (
+                    not param.grad_added_to_main_grad or getattr(param, 'zero_out_wgrad', False)
+                ):
+                    param.main_grad.add_(param.grad.data)
+                param.grad = None
 
-                    if self.ddp_config.overlap_grad_reduce:
-                        self.param_to_bucket_group[param].register_grad_ready(param)
-                    param.skip_grad_accum = True
+                if self.ddp_config.overlap_grad_reduce:
+                    self.param_to_bucket_group[param].register_grad_ready(param)
 
         return hook
 

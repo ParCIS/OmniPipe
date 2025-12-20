@@ -20,3 +20,7 @@ benchmark_cache*
 *.sh
 tensorboard_logs/
 .nfs*
+*.out
+*.err
+core.*
+legacy_log_dir/
