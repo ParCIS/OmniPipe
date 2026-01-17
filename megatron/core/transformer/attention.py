@@ -801,7 +801,6 @@ class Attention(MegatronModule, ABC):
         else:
             if inference_context is None or inference_context.is_static_batching():
                 # Static batching attention kernel.
-                # print(f"[rank{rank}]: before attn, query = {query}, key = {key}, value = {value}")
                 core_attn_out = self.core_attention(
                     query,
                     key,
@@ -811,7 +810,6 @@ class Attention(MegatronModule, ABC):
                     attention_bias=attention_bias,
                     packed_seq_params=packed_seq_params,
                 )
-                # print(f"[rank{rank}]: after attn, core_attn_out = {core_attn_out}")
 
             else:
                 # Dynamic batching attention kernel.
@@ -848,7 +846,6 @@ class Attention(MegatronModule, ABC):
         output, bias = self.linear_proj(core_attn_out)
         
         nvtx_range_pop(suffix="linear_proj")
-        # print(f"[rank{rank}]: after proj, output = {output}, bias = {bias}")
         return output, bias
 
     def set_for_recompute_input_layernorm(self):
@@ -992,7 +989,6 @@ class SelfAttention(Attention):
         Derives `query`, `key` and `value` tensors from `hidden_states`.
         """
         # Attention heads [sq, b, h] --> [sq, b, ng * (np/ng + 2) * hn)]
-        # print(f"[rank{torch.distributed.get_rank()}]: before attn, linear_qkv = {[param for param in self.linear_qkv.parameters()]}")
         mixed_qkv, _ = self.linear_qkv(hidden_states)
 
         # [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]

@@ -15,8 +15,6 @@ logger = logging.getLogger(__name__)
 from .auto_schedule import ChimeraAutoSchedule, ChimeraNode
 from .communication import CommunicationManager
 
-def no_op(*unused_args, **unused_kwargs):
-    pass
 
 class ChimeraScheduler():
     def __init__(self):
@@ -61,14 +59,9 @@ class ChimeraScheduler():
         self.reorder_models(model)
         self.param_sync_model_chunk_id_queue: List[int] = None
         pp_world_size = parallel_state.get_pipeline_model_parallel_world_size()
-        # Check the first two stage whether is full
-        F0_nodes = self.schedule["F0"]
-        F0F1_nodes = self.schedule["F0F1"]
-        # self.pipeline_full = num_microbatches >= 2 * pp_world_size - self.virtual_data_parallel_world_size
-        self.pipeline_full = (len(F0_nodes) + len(F0F1_nodes)) == parallel_state.get_pipeline_model_parallel_world_size()
+
         # Check whether there are 1f1b_overlap block
         F0B1F1B0_nodes = self.schedule["F0B1F1B0"]
-        print(f"[rank{self.rank}]: pipeline_full = {self.pipeline_full}")
         if len(F0B1F1B0_nodes) == 0:
             self.config.overlap_moe_expert_parallel_comm = False
             logger.warning(f"Overlap_moe_expert_parallel_comm is not supported under the number of microbatches {num_microbatches}, set it to False")
@@ -220,7 +213,6 @@ class ChimeraScheduler():
         if len(self.input_tensors[vdp_rank]) == self.current_f_microbatch_id[vdp_rank]:
             self.input_tensors[vdp_rank].append(None)
         input_tensor = self.input_tensors[vdp_rank][microbatch_id]
-        # print(f"[rank{self.rank}, vdp rank {vdp_rank}]: forward microbatch {microbatch_id}")
         return input_tensor
 
     def _forward_step_helper_postprocess(self, vdp_rank, output_tensor, num_tokens):
@@ -235,7 +227,6 @@ class ChimeraScheduler():
             self.input_tensors[vdp_rank][microbatch_id] = None
             self.output_tensors[vdp_rank][microbatch_id] = None
         self.current_f_microbatch_id[vdp_rank] += 1
-        # print(f"[rank{self.rank}, vp stage {vdp_rank}]: microbatch {microbatch_id} forward output = {output_tensor}")
         return
     
     def _backward_step_helper_preprocess(self, vdp_rank):
@@ -326,9 +317,7 @@ class ChimeraScheduler():
     def _forward_step_helper(self, vdp_rank: int) -> None:
         # import here to avoid circle import
         from megatron.core.pipeline_parallel.schedules import forward_step
-        print(f"[rank{self.rank}, vdp rank {vdp_rank}]: checkpoint 1, before forward preprocess.")
         input_tensor = self._forward_step_helper_preprocess(vdp_rank)
-        print(f"[rank{self.rank}, vdp rank {vdp_rank}]: checkpoint 2, after forward preprocess.")
         microbatch_id = self.current_f_microbatch_id[vdp_rank]
 
         # doesn't support checkpoint_activations_microbatch yet
@@ -347,9 +336,7 @@ class ChimeraScheduler():
             vp_stage=vdp_rank,
             is_last_stage=parallel_state.is_pipeline_last_stage(ignore_virtual=False)
         )
-        print(f"[rank{self.rank}, vdp rank {vdp_rank}]: checkpoint 2, after forward.")
         self._forward_step_helper_postprocess(vdp_rank, output_tensor, num_tokens)
-        print(f"[rank{self.rank}, vdp rank {vdp_rank}]: checkpoint 2, after forward post process.")
 
     def _backward_step_helper(self, vdp_rank: int) -> None:
         from megatron.core.pipeline_parallel.schedules import backward_step
@@ -364,7 +351,6 @@ class ChimeraScheduler():
         parallel_state.set_virtual_data_parallel_rank(vdp_rank)
         if recv:
             self._recv_forward(vdp_rank)
-            print(f"[rank{self.rank}, vdp rank {vdp_rank}]: recv forward.")
         self.comm_mgr.commit()
         torch.cuda.nvtx.range_push(f"model_{vdp_rank}_mbc_{self.current_f_microbatch_id[vdp_rank] + vdp_rank * 10}_f")
         if self.config.overlap_moe_expert_parallel_comm:
@@ -379,7 +365,6 @@ class ChimeraScheduler():
         parallel_state.set_virtual_data_parallel_rank(vdp_rank)
         if recv:
             self._recv_backward(vdp_rank)
-        # print(f"[rank {self.rank}]: checkpoint 3, pre_backward = {pre_backward}, post_backward = {post_backward}, comm = {self.comm_mgr.comm_info_for_debug}")
         self.comm_mgr.commit()
         torch.cuda.nvtx.range_push(f"model_{vdp_rank}_mbc_{self.current_b_microbatch_id[vdp_rank] + vdp_rank * 10}_b")
         if self.config.overlap_moe_expert_parallel_comm:
@@ -417,13 +402,8 @@ class ChimeraScheduler():
             decoder = get_attr_wrapped_model(model_wrapped, "decoder")
             transformer_layers = decoder.layers
             for layer in transformer_layers:
-                # self_attn_blocks.append(layer.self_attention)
-                # mlp_blocks.append(layer.mlp)
                 layer.mlp.backward_dw()
                 layer.self_attention.backward_dw()
-            # for mlp, attn in zip(mlp_blocks, self_attn_blocks):
-            #     mlp.backward_dw()
-            #     attn.backward_dw()
 
         def local_backward_dw():
             WeightGradStore.pop()
@@ -461,15 +441,12 @@ class ChimeraScheduler():
         parallel_state.set_virtual_data_parallel_rank(vdp_rank)
         is_last_stage = parallel_state.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vdp_rank)
         if is_last_stage:
-            print(f"[rank{self.rank}, vdp rank {vdp_rank}]: is last stage, donot send.")
             return
 
         microbatch_id = self.current_send_f_microbatch_id[vdp_rank]
-        # print(f"[rank {self.rank}]: checkpoint 1, len of output_tensors[{vdp_rank}] = {len(self.output_tensors[vdp_rank])}, microbatch_id = {microbatch_id}")
         self.current_send_f_microbatch_id[vdp_rank] += 1
         tensor_to_comm = self.output_tensors[vdp_rank][microbatch_id]
         self.comm_mgr.send_forward(tensor_to_comm)
-        print(f"[rank{self.rank}, vdp rank {vdp_rank}]: send forward microbatch {microbatch_id}")
 
     def _recv_backward(self, vdp_rank: int = None) -> None:
         if self.forward_only:
@@ -493,32 +470,9 @@ class ChimeraScheduler():
 
         microbatch_id = self.current_send_b_microbatch_id[vdp_rank]
         self.current_send_b_microbatch_id[vdp_rank] += 1
-        # print(f"[rank {self.rank}]: checkpoint 2, len of input_tensor_grads[{vdp_rank}] = {len(self.input_tensor_grads[vdp_rank])}, microbatch_id = {microbatch_id}")
-        # if tensor_to_comm is None:
         tensor_to_comm = self.input_tensor_grads[vdp_rank][microbatch_id]
         self.input_tensor_grads[vdp_rank][microbatch_id] = None
         self.comm_mgr.send_backward(tensor_to_comm)
-    
-    def _cat_comm_for_combine_chimera(self, comm_func_list: List[Callable], commit_func: Callable = no_op) -> Callable:
-        def combined_comm_func(tensor_to_comm: torch.Tensor = None, *unused_args, **unused_kwargs):
-            for comm_func in comm_func_list:
-                comm_func(tensor_to_comm=tensor_to_comm)
-            commit_func()
-        return combined_comm_func
-
-    def wgrad_compute_and_p2p_commit_helper(self, vdp_rank: int, commit: bool = True)->Callable:
-        if self.config.delay_wgrad_compute and commit:
-            # When overlap_moe_expert_parallel_comm and delay_wgrad_compute are both True, the p2p communication overlap with wgrad compute will be handled in combined_1f1b
-            if self.config.overlap_moe_expert_parallel_comm:
-                wgrad_and_p2p_overlap = self.comm_mgr.commit
-            else:
-                wgrad_and_p2p_overlap = partial(self._wgrad_compute_and_p2p_overlap, vdp_rank=vdp_rank)
-        else:
-            wgrad_and_p2p_overlap = no_op
-        return wgrad_and_p2p_overlap
-
-    def commit_wrapper(self, *unused_args, **unused_kwargs):
-        self.comm_mgr.commit()
     
     def _is_last_microbatch(self, vdp_rank):
         microbatch_id = self.current_b_microbatch_id[vdp_rank]
@@ -547,9 +501,6 @@ class ChimeraScheduler():
         Because the communication of multiple pipeline is complex, 
         reader can refence to the dualpipe
         """
-        # for i, model_chunk in enumerate(self.model):
-        #     for name, param in model_chunk.named_parameters():
-        #         print(f"[rank{self.rank}, vdp rank {model_chunk.vp_stage}]: before chimera scheduler, {name} = {param}")
         self.disable_grad_sync()
         is_middle_rank = ChimeraNode.is_middle_rank
         # Synchronize params for first model chunks
@@ -561,47 +512,52 @@ class ChimeraScheduler():
         logger.debug(f"[rank{self.rank}]: Step 1")
         F0_nodes = self.schedule["F0"]
         for node in F0_nodes:
-            vdp_rank = node.virtual_data_parallel_rank
-            self._forward_with_comm(vdp_rank)
+            if node.is_idle():
+                self.comm_mgr.commit()
+            else:
+                vdp_rank = node.virtual_data_parallel_rank
+                self._forward_with_comm(vdp_rank)
         # Step 2: nF0F1
         logger.debug(f"[rank{self.rank}]: Step 2")
         F0F1_nodes = self.schedule["F0F1"]
-        self_vdp = vdp_rank=F0F1_nodes[0].virtual_data_parallel_rank
-        # If the pipeline is not full, all the microbatch need to send immediately.
-        # Note that, the middle ranks are always full.
-        send_immediately = not self.pipeline_full
-        if not send_immediately:
-            self._recv_forward(vdp_rank=F0F1_nodes[0].virtual_data_parallel_rank)    # dualpipe: recv_forward(0)
+        self_vdp = F0F1_nodes[0].virtual_data_parallel_rank
+        # If the vdp_size > 2, all the microbatch need to send immediately.
+        if not F0F1_nodes[0].is_idle():
+            self._recv_forward(F0F1_nodes[0].virtual_data_parallel_rank)
+        send_immediately = False
         for i in range(0, len(F0F1_nodes), 2):
             node0 = F0F1_nodes[i]
             node1 = F0F1_nodes[i + 1]
             vdp_rank0 = node0.virtual_data_parallel_rank
             vdp_rank1 = node1.virtual_data_parallel_rank
-            self._forward_with_comm(vdp_rank0, recv=send_immediately, send=is_middle_rank or send_immediately)
-            if not self.pipeline_full and i == 0:
+            if node0.is_idle():
                 self.comm_mgr.commit()
-            # dualpipe recv_forward(0)
-            if self.pipeline_full:
-                if i < len(F0F1_nodes) - 2:
-                    next_F_node = F0F1_nodes[i + 2]
+            else:
+                self._forward_with_comm(vdp_rank0, recv=send_immediately, send=is_middle_rank or send_immediately)
+            if i < len(F0F1_nodes) - 2:
+                # When new vdp_rank occurs, set the send_immediately. Otherwise, recv the next F0.
+                next_F_node = F0F1_nodes[i + 2]
+                if not next_F_node.is_idle():
                     if next_F_node.virtual_data_parallel_rank == self_vdp:
                         self._recv_forward(next_F_node.virtual_data_parallel_rank)
                     else:
-                        # Because the pipeline_full is True for middel ranks, so send_immediately is no use for middle rank.
-                        # When new vdp rank occurs, the forward result should be send immediately.
-                        if not is_middle_rank:
-                            send_immediately = True
-                else:
-                    # recv next down pipeline
-                    if len(self.schedule["F0B1F1B0"]) > 0:
-                        self._recv_forward(self.schedule["F0B1F1B0"][0].virtual_data_parallel_rank)
+                        send_immediately = True
+            else:
+                # If the F0F1_nodes are finished, recv the first node of F0B1F1B0_nodes.
+                if len(self.schedule["F0B1F1B0"]) > 0:
+                    self._recv_forward(self.schedule["F0B1F1B0"][0].virtual_data_parallel_rank)
             self._forward_with_comm(vdp_rank1, send=(not is_middle_rank) or (i < len(F0F1_nodes) - 2))
-            if not (is_middle_rank or send_immediately):
+            if not node0.is_idle() and not (is_middle_rank or send_immediately):
                 self._send_forward(vdp_rank=vdp_rank0)
-        # If the pipeline is full, and the vdp_size > 2, the send_immediately will be set in ranks except middle ranks.
-        # In this case, there is a self_vdp microbatch should be send to next stage.
-        # The corresponding code is provided in Line 596.
-        if self.pipeline_full and send_immediately:
+        # If the F0B1F1B0_nodes is empty, where the num_microbatch is below than 2 * pp - vdp_size.
+        # The middle ranks need to send the last node of F0F1_nodes.
+        # If the vdp_size > 2, there will leave a node of the self_vdp_rank does not be sent, and send it here.
+        # The corresponding code is provided in Line 598.
+        if is_middle_rank:
+            if len(self.schedule["F0B1F1B0"]) == 0:
+                self._send_forward(F0F1_nodes[-1].virtual_data_parallel_rank)
+        else:
+            if not F0F1_nodes[0].is_idle() and send_immediately:
                 self._send_forward(self_vdp)
 
         # Step 3: nB1W1F1
@@ -613,8 +569,6 @@ class ChimeraScheduler():
             self._backward_with_comm(node0.virtual_data_parallel_rank)
             self._recv_forward(node1.virtual_data_parallel_rank)
             self._wgrad_compute_and_p2p_overlap(node0.virtual_data_parallel_rank)
-            # if self.config.delay_wgrad_compute:
-            #     self._wgrad_compute_and_p2p_overlap(node0.virtual_data_parallel_rank)
             self._forward_with_comm(node1.virtual_data_parallel_rank, recv=False)
         
 
@@ -655,7 +609,6 @@ class ChimeraScheduler():
             B_node = partial_F0B1F1B0_nodes[i + 1]
             recv = (i == 0)
             if F_node.is_idle():
-                # print(f"[rank {self.rank}]: checkpoint 1, pre_backward = {B_pre_backward}, post_backward = {FB_post_backward_func_list}")
                 self._backward_with_comm(B_node.virtual_data_parallel_rank, recv=recv)
             else:
                 self._forward_backward_with_comm(F_node.virtual_data_parallel_rank, B_node.virtual_data_parallel_rank, recv_0=recv, recv_1=recv)
@@ -669,67 +622,10 @@ class ChimeraScheduler():
             else:
                 commit = False
             self._wgrad_compute_and_p2p_overlap(B_node.virtual_data_parallel_rank, commit=commit)
-            # if B1_enable_decouple_dw:
-            #     if not F1_node.is_idle():
-            #         self._recv_forward(F1_node.virtual_data_parallel_rank)
-            #     else:
-            #         self._recv_backward(B0_node.virtual_data_parallel_rank)
-            #     self._wgrad_compute_and_p2p_overlap()
-            # if F1_node.is_idle():
-            #     self._backward_with_comm(B0_node.virtual_data_parallel_rank, recv=not B1_enable_decouple_dw)
-            # else:
-            #     self._forward_backward_with_comm(F1_node.virtual_data_parallel_rank, B0_node.virtual_data_parallel_rank, recv_0=not B1_enable_decouple_dw)
-            ## TODO
-            # if F1_node.is_idle():
-            #     if self.config.delay_wgrad_compute:
-            #         self._recv_backward(B0_node.virtual_data_parallel_rank)
-            #         self._wgrad_compute_and_p2p_overlap(self.last_backward_vdp_rank)
-            #         self.last_backward_vdp_rank = None
-            #     self._backward_with_comm(B0_node.virtual_data_parallel_rank, recv=not self.config.delay_wgrad_compute)
-            #     self.last_backward_vdp_rank = B0_node.virtual_data_parallel_rank
-            # else:
-            #     if self.config.delay_wgrad_compute:
-            #         self._recv_forward(F1_node.virtual_data_parallel_rank)
-            #         self._recv_backward(B0_node.virtual_data_parallel_rank)
-            #         self._wgrad_compute_and_p2p_overlap(self.last_backward_vdp_rank)
-            #         self.last_backward_vdp_rank = None
-            #         recv_0, recv_1 = False, False
-            #     else:
-            #         recv_0, recv_1 = True, True
-            #     self._forward_backward_with_comm(F1_node.virtual_data_parallel_rank, B0_node.virtual_data_parallel_rank, recv_0=recv_0, recv_1=recv_1)
-            #     self.last_backward_vdp_rank = B0_node.virtual_data_parallel_rank
-
-
-        
-        # Step 6: n B1B0
-        # B1B0_nodes = self.schedule["B1B0"]
-        # for i in range(0, len(B1B0_nodes), 2):
-        #     # backward B1, enable decouple dw in the not middle rank
-        #     B1_node = B1B0_nodes[i]
-        #     B0_node = B1B0_nodes[i + 1]
-        #     if self.config.delay_wgrad_compute:
-        #         self._recv_backward(B1_node.virtual_data_parallel_rank)
-        #         self._wgrad_compute_and_p2p_overlap(self.last_backward_vdp_rank)
-        #         self.last_backward_vdp_rank = None
-        #     self._backward_with_comm(B1_node.virtual_data_parallel_rank, recv=not self.config.delay_wgrad_compute)
-        #     self.last_backward_vdp_rank = B1_node.virtual_data_parallel_rank
-        #     # self._recv_backward(B0_node.virtual_data_parallel_rank)
-        #     # if B1_enable_decouple_dw:
-        #     #     self._wgrad_compute_and_p2p_overlap()
-        #     # backward B0
-        #     # B0_enable_decouple_dw = i == len(B1B0_nodes) - 2
-        #     if self.config.delay_wgrad_compute:
-        #         self._recv_backward(B0_node.virtual_data_parallel_rank)
-        #         self._wgrad_compute_and_p2p_overlap(self.last_backward_vdp_rank)
-        #         self.last_backward_vdp_rank = None
-        #     self._backward_with_comm(B0_node.virtual_data_parallel_rank, recv=not self.config.delay_wgrad_compute)
-        #     self.last_backward_vdp_rank = B0_node.virtual_data_parallel_rank
         
         # Step 7: n B1 or B0
         logger.debug(f"[rank{self.rank}]: Step 6")
         single_B_nodes = self.schedule["B1B0"] + self.schedule["Single_B"]
-        # if len(single_B_nodes) > 0:
-        #     self._recv_backward(single_B_nodes[0].virtual_data_parallel_rank)
         for i in range(0, len(single_B_nodes)):
             node = single_B_nodes[i]
             recv = (i == 0)
@@ -738,33 +634,12 @@ class ChimeraScheduler():
                 next_B_node = single_B_nodes[i + 1]
                 self._recv_backward(next_B_node.virtual_data_parallel_rank)
             self._wgrad_compute_and_p2p_overlap(node.virtual_data_parallel_rank)
-            # self.last_backward_vdp_rank = node.virtual_data_parallel_rank
-            # if node is not the last one, recv next one and send this one
-            # if i < len(single_B_nodes) - 1:
-            #     self._recv_backward(single_B_nodes[i + 1].virtual_data_parallel_rank)
-            # if self.enable_decouple_dw:
-            #     self._wgrad_compute_and_p2p_overlap()
-        # pipeline finish
-        # if self.config.delay_wgrad_compute:
-        #     self._wgrad_compute_and_p2p_overlap(self.last_backward_vdp_rank)
-        #     self.last_backward_vdp_rank = None
         logger.debug(f"[rank{self.rank}]: Sync")
         self.comm_mgr.commit()
         self._finish_sync()
         logger.debug(f"[rank{self.rank}]: pipeline finish")
         # Set to the last pipeline stage needed virtual data parallel rank.
         # Only the stage that maybe be the last stage will be set.
-        # pp_rank = parallel_state.get_pipeline_model_parallel_rank()
-        # pp = parallel_state.get_pipeline_model_parallel_world_size()
-        # offset_unit = pp // (self.virtual_data_parallel_world_size // 2)
-        # if pp_rank % offset_unit == 0:
-        #     # formmer half of vdp ranks
-        #     vdp_rank = pp_rank // offset_unit
-        #     last_stage_vdp_rank = vdp_rank + self.virtual_data_parallel_world_size // 2
-        # else:
-        #     # latter half of vdp ranks
-        #     vdp_rank = (pp - 1 - pp_rank) // offset_unit
-        #     last_stage_vdp_rank = vdp_rank
         last_stage_vdp_rank = 0
         for i in range(self.virtual_data_parallel_world_size):
             if parallel_state.is_pipeline_last_stage(ignore_virtual=True, vp_stage=i):
@@ -777,10 +652,6 @@ class ChimeraScheduler():
         if self.first_run:
             self.param_sync_model_chunk_id_queue = list(reversed(self.sync_model_queue))
             self.first_run = False
-        # print(f"[rank{self.rank}]: forward data store = {self.forward_data_store}")
-        # for i, model_chunk in enumerate(self.model):
-        #     for name, param in model_chunk.named_parameters():
-        #         print(f"[rank{self.rank}, vdp rank {model_chunk.vp_stage}]: after chimera scheduler, {name} = {param}")
         return self.forward_data_store
 
     def __call__(self, *args, **kwds):

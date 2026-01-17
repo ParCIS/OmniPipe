@@ -1027,10 +1027,6 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         if args.data_parallel_random_init:
             for model_module in model:                 
                 model_module.broadcast_params()
-    for model_chunk in model:
-        for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
-                for bucket in buffer.buckets:
-                    print(f"[rank{rank}, vdp rank {model_chunk.vp_stage}]: bucket.param = {bucket.param_data}, bucket.grad = {bucket.grad_data}")
     return model
 
 
@@ -1304,14 +1300,7 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     # Update parameters.
 
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
-    rank = torch.distributed.get_rank()
-    # for i, model_chunk in enumerate(model):
-    #     for name, param in model_chunk.named_parameters():
-    #         print(f"[rank{rank}, vdp rank {model_chunk.vp_stage}]: before optimizer, {name} = {param}")
     update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
-    # for i, model_chunk in enumerate(model):
-    #     for name, param in model_chunk.named_parameters():
-    #         print(f"[rank{rank}, vdp rank {model_chunk.vp_stage}]: after optimizer, {name} = {param}")
     timers('optimizer').stop()
 
     # when freezing sub-models we may have a mixture of successful and unsucessful ranks,

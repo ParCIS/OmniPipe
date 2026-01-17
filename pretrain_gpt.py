@@ -242,7 +242,6 @@ def loss_func(
         return loss_func_modelopt(loss_mask, output_tensor, model=model)
 
     losses = output_tensor.view(-1).float()
-    # print(f"[rank{torch.distributed.get_rank()}]: loss = {losses}")
     loss_mask = loss_mask.view(-1).float()
     loss = torch.sum(losses * loss_mask)
 
@@ -279,7 +278,6 @@ def loss_func(
 
     num_tokens = loss_mask.sum().clone().detach().to(torch.int)
     reporting_loss = torch.cat([loss.clone().detach().view(1), num_tokens.view(1)])
-    # print(f"[rank{torch.distributed.get_rank()}]: loss tensor = {losses}, loss = {loss}, reporting_loss = {reporting_loss}")
     return (loss, num_tokens, {'lm loss': reporting_loss})
 
 

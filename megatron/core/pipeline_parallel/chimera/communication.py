@@ -43,7 +43,6 @@ class CommunicationManager:
         self.send_backward_microbatch_id: List[int] = [0 for _ in range(virtual_data_parallel_world_size)]
         self.recv_forward_microbatch_id: List[int] = [0 for _ in range(virtual_data_parallel_world_size)]
         self.recv_backward_microbatch_id: List[int] = [0 for _ in range(virtual_data_parallel_world_size)]
-        self.recv_buffers = []
     
     def _generate_unique_tag(self, src_global_rank: int, direction: int, vdp_rank: int, microbatch_id: int):
         """
@@ -80,7 +79,6 @@ class CommunicationManager:
         self.recv_forward_microbatch_id[vdp_rank] += 1
         buffer = torch.zeros(self.tensor_shape, device=torch.cuda.current_device(), requires_grad=True, dtype=self.tensor_dtype)
         self.recv_ops.append(dist.P2POp(dist.irecv, buffer, src, tag=tag))
-        self.recv_buffers.append(buffer)
         return buffer
 
     def send_backward(self, tensor_to_send: torch.Tensor):
@@ -100,7 +98,6 @@ class CommunicationManager:
         self.recv_backward_microbatch_id[vdp_rank] += 1
         buffer = torch.zeros(self.tensor_shape, device=torch.cuda.current_device(), requires_grad=True, dtype=self.tensor_dtype)
         self.recv_ops.append(dist.P2POp(dist.irecv, buffer, src, tag=tag))
-        self.recv_buffers.append(buffer)
         return buffer
 
     def commit(self, wait: bool = True):
@@ -109,7 +106,6 @@ class CommunicationManager:
         else:
             self.p2p_ops = self.recv_ops + self.send_ops
         if len(self.p2p_ops) == 0:
-            print(f"[rank{self.rank}]: len of p2p ops = 0.")
             return
         logger.debug(f"[rank {self.rank}]: commit p2p ops: {self.comm_info_for_debug}, p2p_ops = {self.p2p_ops}")
         self.reqs = dist.batch_isend_irecv(self.p2p_ops)

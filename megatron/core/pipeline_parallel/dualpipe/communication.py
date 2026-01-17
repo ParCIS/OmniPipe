@@ -24,7 +24,6 @@ def build_from_tensor_shapes():
 
 def append_irecv(ops: List[dist.P2POp], src: int) -> List[torch.Tensor]:
     rank = dist.get_rank()
-    print(f"[rank{rank}]: recv ({src}, {rank})")
     tensors = build_from_tensor_shapes()
     for tensor in tensors:
         if tensor is not None:
@@ -35,7 +34,6 @@ def append_irecv(ops: List[dist.P2POp], src: int) -> List[torch.Tensor]:
 
 def append_isend(ops: List[dist.P2POp], tensors: List[torch.Tensor], dst: int) -> None:
     rank = dist.get_rank()
-    print(f"[rank{rank}]: send ({rank}, {dst})")
     for tensor in tensors:
         if tensor is not None:
             ops.append(dist.P2POp(dist.isend, tensor, dst))

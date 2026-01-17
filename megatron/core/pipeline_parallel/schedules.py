@@ -851,10 +851,6 @@ def forward_backward_pipelining_with_interleaving(
     # microbatch_id in [0, num_microbatches)
     # model_chunk_id in [0, num_model_chunks)
     # virtual_microbatch_id in [0, total_num_microbatches)
-    rank = torch.distributed.get_rank()
-    # for i, model_chunk in enumerate(model):
-    #     for name, param in model_chunk.named_parameters():
-    #         print(f"[rank{rank}, vdp rank {model_chunk.vp_stage}]: before 1f1b scheduler, {name} = {param}")
     config = get_model_config(model[0])
     if p2p_communicator is None and grad_finalize_pgs is None:
         p2p_communicator = P2PCommunicator(
@@ -1198,7 +1194,6 @@ def forward_backward_pipelining_with_interleaving(
         # microbatch_id offset with number of released microbatches that have completed backprop.
         offset = num_released_microbatches(virtual_microbatch_id, model_chunk_id)
         input_tensor = input_tensors[model_chunk_id][microbatch_id - offset]
-        # print(f"[rank{rank}, vp stage {model_chunk_id}]: forward microbatch {microbatch_id - offset} = {input_tensor}")
         return input_tensor
 
     def forward_step_helper_postprocess(model_chunk_id, output_tensor, num_tokens):
@@ -1266,7 +1261,6 @@ def forward_backward_pipelining_with_interleaving(
         input_tensor = input_tensors[model_chunk_id].pop(0)
         output_tensor = output_tensors[model_chunk_id].pop(0)
         output_tensor_grad = output_tensor_grads[model_chunk_id].pop(0)
-        # print(f"[rank{rank}, vp stage {model_chunk_id}]: backward microbatch {virtual_microbatch_id}, input tensor = {input_tensor}, output tensor = {output_tensor}, output tensor grad = {output_tensor_grad}")
         return input_tensor, output_tensor, output_tensor_grad
 
     def backward_step_helper_postprocess(virtual_microbatch_id):
@@ -1940,10 +1934,6 @@ def forward_backward_pipelining_with_interleaving(
     ):
         create_cudagraphs()
     nvtx_range_pop(suffix="misc")
-    rank = torch.distributed.get_rank()
-    # for i, model_chunk in enumerate(model):
-    #     for name, param in model_chunk.named_parameters():
-    #         print(f"[rank{rank}, vdp rank {model_chunk.vp_stage}]: after 1f1b scheduler, {name} = {param}")
     return forward_data_store
 
 

@@ -559,9 +559,6 @@ class DistributedDataParallel(_BaseDataParallel):
                 other settings.
             force_dispatch (bool, optional): force dispatch regardless of other settings.
         """
-        # rank = torch.distributed.get_rank()
-        # if rank == 0 or rank == 7:
-        #     print(f"[rank{rank}, vp stage {self.vp_stage}]: start to param sync.")
         if not force_sync:
             # If overlapping param AG with optimizer step, AG should not be dispatched again
             # in forward_backward_step.
@@ -600,9 +597,6 @@ class DistributedDataParallel(_BaseDataParallel):
         calls. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
         """
-        # rank = torch.distributed.get_rank()
-        # if rank == 0 or rank == 7:
-        #     print(f"[rank{rank}, vp stage {self.vp_stage}]: start to grad sync.")
         for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
             bucket_group.start_grad_sync()
 
