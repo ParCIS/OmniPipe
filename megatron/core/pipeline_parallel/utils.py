@@ -8,16 +8,43 @@ import torch
 from torch.autograd import Variable
 
 from megatron.core.utils import get_pg_rank, get_pg_size, make_viewless_tensor
+from megatron.core.parallel_state import get_virtual_data_parallel_rank, get_virtual_data_parallel_world_size
 
 
 def is_pp_first_stage(pp_group: torch.distributed.ProcessGroup):
     """Return True if in the first pipeline model-parallel stage, False otherwise."""
-    return get_pg_rank(pp_group) == 0
+    vdp_size = get_virtual_data_parallel_world_size()
+    if vdp_size is None:
+        return get_pg_rank(pp_group) == 0
+    else:
+        vdp_rank = get_virtual_data_parallel_rank()
+        pp_size = get_pg_size(pp_group)
+        pp_rank = get_pg_rank(pp_group)
+        offset_unit = pp_size // vdp_size * 2
+        if vdp_rank < vdp_size // 2:
+            pp_first_rank = offset_unit * vdp_rank
+        else:
+            vdp_rank = vdp_rank - vdp_size // 2
+            pp_first_rank = (pp_size - 1) - (vdp_rank * offset_unit)
+        return pp_rank == pp_first_rank
 
 
 def is_pp_last_stage(pp_group: torch.distributed.ProcessGroup):
     """Return True if in the last pipeline-model-parallel stage, False otherwise."""
-    return get_pg_rank(pp_group) == (get_pg_size(pp_group) - 1)
+    vdp_size = get_virtual_data_parallel_world_size()
+    if vdp_size is None:
+        return get_pg_rank(pp_group) == (get_pg_size(pp_group) - 1)
+    else:
+        vdp_rank = get_virtual_data_parallel_rank()
+        pp_size = get_pg_size(pp_group)
+        pp_rank = get_pg_rank(pp_group)
+        offset_unit = pp_size // vdp_size * 2
+        if vdp_rank < vdp_size // 2:
+            pp_last_rank = (pp_size - 1 + vdp_rank * offset_unit) % pp_size
+        else:
+            vdp_rank = vdp_rank - vdp_size // 2
+            pp_last_rank = vdp_rank * offset_unit
+        return pp_rank == pp_last_rank
 
 
 def is_vp_first_stage(vp_stage: int, vp_size: int | None):
@@ -45,23 +72,52 @@ def is_vp_last_stage(vp_stage: int, vp_size: int | None):
 def get_pp_first_rank(pp_group: torch.distributed.ProcessGroup):
     """Return the global rank of the first rank in the pipeline parallel group."""
     pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
-    return pp_ranks[0]
+    vdp_size = get_virtual_data_parallel_world_size()
+    if vdp_size is None:
+        return pp_ranks[0]
+    else:
+        vdp_rank = get_virtual_data_parallel_rank()
+        pp_size = get_pg_size(pp_group)
+        offset_unit = pp_size // vdp_size * 2
+        if vdp_rank < vdp_size // 2:
+            pp_first_rank = offset_unit * vdp_rank
+        else:
+            vdp_rank = vdp_rank - vdp_size // 2
+            pp_first_rank = (pp_size - 1) - (vdp_rank * offset_unit)
+        return pp_first_rank
 
 
 def get_pp_last_rank(pp_group: torch.distributed.ProcessGroup):
     """Return the global rank of the last rank in the pipeline parallel group."""
     pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
-    return pp_ranks[-1]
-
+    vdp_size = get_virtual_data_parallel_world_size()
+    if vdp_size is None:
+        return pp_ranks[-1]
+    else:
+        vdp_rank = get_virtual_data_parallel_rank()
+        pp_size = get_pg_size(pp_group)
+        offset_unit = pp_size // vdp_size * 2
+        if vdp_rank < vdp_size // 2:
+            pp_last_rank = (pp_size - 1 + vdp_rank * offset_unit) % pp_size
+        else:
+            vdp_rank = vdp_rank - vdp_size // 2
+            pp_last_rank = vdp_rank * offset_unit
+        return pp_last_rank
 
 def get_pp_next_rank(pp_group: torch.distributed.ProcessGroup):
     """Return the global rank of the next rank in the pipeline parallel group, or None if last
     stage."""
     if is_pp_last_stage(pp_group):
         return None
+    vdp_size = get_virtual_data_parallel_world_size()
+    vdp_rank = get_virtual_data_parallel_rank()
     current_rank_in_group = get_pg_rank(pp_group)
     pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
-    return pp_ranks[current_rank_in_group + 1]
+    pp_size = torch.distributed.get_process_group_ranks(pp_group)
+    if vdp_size is None or vdp_rank < vdp_size // 2:
+        return pp_ranks[(current_rank_in_group + 1 + pp_size) % pp_size]
+    else:
+        return pp_ranks[(current_rank_in_group - 1 + pp_size) % pp_size]
 
 
 def get_pp_prev_rank(pp_group: torch.distributed.ProcessGroup):
@@ -69,9 +125,15 @@ def get_pp_prev_rank(pp_group: torch.distributed.ProcessGroup):
     first stage."""
     if is_pp_first_stage(pp_group):
         return None
+    vdp_size = get_virtual_data_parallel_world_size()
+    vdp_rank = get_virtual_data_parallel_rank()
     current_rank_in_group = get_pg_rank(pp_group)
     pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
-    return pp_ranks[current_rank_in_group - 1]
+    pp_size = torch.distributed.get_process_group_ranks(pp_group)
+    if vdp_size is None or vdp_rank < vdp_size // 2:
+        return pp_ranks[(current_rank_in_group - 1 + pp_size) % pp_size]
+    else:
+        return pp_ranks[(current_rank_in_group + 1 + pp_size) % pp_size]
 
 
 def make_viewless(e):

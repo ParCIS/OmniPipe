@@ -25,13 +25,17 @@ def build_pretraining_data_loader(dataset, consumed_samples):
         split = dataset.index_split
     else:
         split = None
-
+    if mpu.get_virtual_data_parallel_world_size() is not None:
+        vdp_rank = mpu.get_virtual_data_parallel_rank()
+        dp_rank = mpu.get_global_dp_rank_in_vdp_group(vdp_rank)
+    else:
+        dp_rank = mpu.get_data_parallel_rank()
     if split == Split.valid and args.full_validation:
         batch_sampler = MegatronPretrainingSampler(
             total_samples=len(dataset),
             consumed_samples=0,
             micro_batch_size=args.micro_batch_size,
-            data_parallel_rank=mpu.get_data_parallel_rank(),
+            data_parallel_rank=dp_rank,
             data_parallel_size=mpu.get_data_parallel_world_size())
     elif args.dataloader_type == 'single':
         # Megatron sampler
@@ -39,7 +43,7 @@ def build_pretraining_data_loader(dataset, consumed_samples):
             total_samples=len(dataset),
             consumed_samples=consumed_samples,
             micro_batch_size=args.micro_batch_size,
-            data_parallel_rank=mpu.get_data_parallel_rank(),
+            data_parallel_rank=dp_rank,
             data_parallel_size=mpu.get_data_parallel_world_size())
     elif args.dataloader_type == 'cyclic':
         batch_sampler = MegatronPretrainingRandomSampler(
@@ -47,7 +51,7 @@ def build_pretraining_data_loader(dataset, consumed_samples):
             total_samples=len(dataset),
             consumed_samples=consumed_samples,
             micro_batch_size=args.micro_batch_size,
-            data_parallel_rank=mpu.get_data_parallel_rank(),
+            data_parallel_rank=dp_rank,
             data_parallel_size=mpu.get_data_parallel_world_size(),
             data_sharding=args.data_sharding)
     elif args.dataloader_type == "external":

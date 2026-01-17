@@ -22,6 +22,17 @@ def generator_wrapper(
             yield x
         return
 
+
+def update_global_config_for_chimera(args):
+    ep = args.expert_model_parallel_size
+    vdp = args.virtual_data_parallel_size
+    args.delay_wgrad_compute = True
+    if args.num_experts is not None:
+        args.expert_model_parallel_size = ep * vdp
+    from megatron.core.models.common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan
+    TransformerModelChunkSchedulePlan.run = transformer_model_chunk_schedule_plan_run_patch
+    
+
 def init_chimera_parallel_state():
     """
     Initialize Chimera parallel groups.
@@ -107,6 +118,9 @@ def init_chimera_parallel_state():
     for pp_rank in range(pp // vdp):
         dual_pp_rank = pp - 1 - pp_rank
         pp_ranks = [i for i in range(pp_rank, pp, offset_unit)] + [i for i in range(dual_pp_rank, -1, -offset_unit)]
+        if global_rank in pp_ranks:
+            parallel_state._LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = pp_ranks
+            print(f">>> [rank{global_rank}]: Chimera local virtual data parallel rank to pipeline rank map = {pp_ranks}")
 
         # constructe new dp groups
         for i in range(num_dp_group_per_stage):
@@ -293,7 +307,7 @@ def get_chimera_forward_backward_func():
     return CHIMERA_SCHEDULER
 
 
-__all__ = ["init_chimera_parallel_state", "get_chimera_forward_backward_func"]
+__all__ = ["update_global_config_for_chimera", "get_chimera_forward_backward_func"]
 
 # pretrain_gpt.py 头部添加
 import os

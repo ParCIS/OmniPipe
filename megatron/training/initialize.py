@@ -353,6 +353,7 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
                 expert_model_parallel_size=args.expert_model_parallel_size,
                 num_distributed_optimizer_instances=args.num_distributed_optimizer_instances,
                 expert_tensor_parallel_size=args.expert_tensor_parallel_size,
+                virtual_data_parallel_size=args.virtual_data_parallel_size,
                 distributed_timeout_minutes=args.distributed_timeout_minutes,
                 nccl_communicator_config_path=args.nccl_communicator_config_path,
                 order='tp-cp-ep-dp-pp' if not args.use_tp_pp_dp_mapping else 'tp-cp-ep-pp-dp',
@@ -392,9 +393,13 @@ def _set_random_seed(
     """Set random seed for reproducability."""
     if seed_ is not None and seed_ > 0:
         # Ensure that different pipeline MP stages get different seeds.
-        seed = seed_ + (100 * mpu.get_pipeline_model_parallel_rank())
+        vdp_size = mpu.get_virtual_data_parallel_world_size()
+        if vdp_size is None:
+            seed = seed_ + (100 * mpu.get_pipeline_model_parallel_rank())
+        else:
+            seed = seed_ + (100 * mpu.get_relative_pipeline_rank())
         # Ensure different data parallel ranks get different seeds
-        if data_parallel_random_init:
+        if data_parallel_random_init: 
             seed = seed + (10 * mpu.get_data_parallel_rank())
         random.seed(seed)
         np.random.seed(seed)

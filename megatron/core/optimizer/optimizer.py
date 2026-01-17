@@ -523,7 +523,13 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
                 barrier=self.config.barrier_with_L1_time
             )
         if not self.is_stub_optimizer:
+            # for i, param_group in enumerate(self.optimizer.param_groups):
+            #     for j, param in enumerate(param_group['params']):
+            #         print(f"[rank{torch.distributed.get_rank()}]: before optimizer step, param[{i}][{j}] = {param}, shape = {param.data.shape}")
             self.optimizer.step()
+            # for i, param_group in enumerate(self.optimizer.param_groups):
+            #     for i, param in enumerate(param_group['params']):
+            #         print(f"[rank{torch.distributed.get_rank()}]: after optimizer step, param[{i}][{j}] = {param}, shape = {param.data.shape}")
         if timers is not None:
             timers('optimizer-inner-step').stop()
 

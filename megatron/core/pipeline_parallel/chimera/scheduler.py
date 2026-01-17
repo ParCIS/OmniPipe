@@ -39,11 +39,9 @@ class ChimeraScheduler():
         """Run chimera schedule (multiple pipeline per GPU).
         Returns dictionary with losses if the last stage, empty dict otherwise.
         """
+        # Megatron config
         # import here to avoid circle import
         from megatron.core.pipeline_parallel.schedules import clear_embedding_activation_buffer, deallocate_output_tensor
-        self.model = model
-        self.config = get_model_config(model[0])
-        self.ddp_config = model[0].ddp_config
         self.forward_step_func = forward_step_func
         self.data_iterator = data_iterator
         self.num_microbatches = num_microbatches
@@ -55,9 +53,32 @@ class ChimeraScheduler():
         self.first_val_step = first_val_step
         self.adjust_tensor_shapes_fn = adjust_tensor_shapes_fn
 
+        # Distributed config
+        self.rank = dist.get_rank()
+        self.world_size = dist.get_world_size()
+        self.virtual_data_parallel_world_size = parallel_state.get_virtual_data_parallel_world_size()
+        self.schedule = ChimeraAutoSchedule(self.rank, self.world_size, parallel_state.get_pipeline_model_parallel_world_size(), parallel_state.get_virtual_data_parallel_world_size(), num_microbatches).get_schedule()
+        self.reorder_models(model)
+        self.param_sync_model_chunk_id_queue: List[int] = None
+        pp_world_size = parallel_state.get_pipeline_model_parallel_world_size()
+        # Check the first two stage whether is full
+        F0_nodes = self.schedule["F0"]
+        F0F1_nodes = self.schedule["F0F1"]
+        # self.pipeline_full = num_microbatches >= 2 * pp_world_size - self.virtual_data_parallel_world_size
+        self.pipeline_full = (len(F0_nodes) + len(F0F1_nodes)) == parallel_state.get_pipeline_model_parallel_world_size()
+        # Check whether there are 1f1b_overlap block
+        F0B1F1B0_nodes = self.schedule["F0B1F1B0"]
+        print(f"[rank{self.rank}]: pipeline_full = {self.pipeline_full}")
+        if len(F0B1F1B0_nodes) == 0:
+            self.config.overlap_moe_expert_parallel_comm = False
+            logger.warning(f"Overlap_moe_expert_parallel_comm is not supported under the number of microbatches {num_microbatches}, set it to False")
+        if self.rank == 0:
+            logger.info(f">>>ChimeraScheduler finishes initialization.")
+
+        # Megatron config postprocess
         if self.config.overlap_p2p_comm and self.config.batch_p2p_comm:
             raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
-        self.num_model_chunks = len(self.model)
+        self.num_model_chunks = len(model)
         self.tensor_shape = [seq_length, micro_batch_size, self.config.hidden_size]
         self.tensor_shape[0] //= parallel_state.get_context_parallel_world_size()
         if self.config.sequence_parallel:
@@ -86,20 +107,8 @@ class ChimeraScheduler():
             self.no_sync_func = contextlib.nullcontext
         self.no_sync_context = None
 
-        if self.config.grad_sync_func is not None and not isinstance(self.config.grad_sync_func, list):
-            self.config.grad_sync_func = [self.config.grad_sync_func for _ in model]
-        # Disable config.grad_sync_func and config.param_sync_func if only running forward passes.
-        # They will be re-enabled at the end of this function.
-        self.grad_sync_func, self.param_sync_func = None, None
-        if forward_only:
-            self.grad_sync_func, self.param_sync_func = self.config.grad_sync_func, self.config.param_sync_func
-            self.config.grad_sync_func, self.config.param_sync_func = None, None
         self.model_type = get_model_type(model[0])
-
-        self.rank = dist.get_rank()
-        self.world_size = dist.get_world_size()
-        self.virtual_data_parallel_world_size = parallel_state.get_virtual_data_parallel_world_size()
-        self.schedule = ChimeraAutoSchedule(self.rank, self.world_size, parallel_state.get_pipeline_model_parallel_world_size(), parallel_state.get_virtual_data_parallel_world_size(), num_microbatches).get_schedule()
+        # Chimera config
         self.comm_mgr = CommunicationManager(
             num_microbatches=self.num_microbatches,
             tensor_shape=self.tensor_shape,
@@ -108,14 +117,7 @@ class ChimeraScheduler():
             virtual_data_parallel_world_size=self.virtual_data_parallel_world_size
         )
         self.reset()
-        self.param_sync_model_chunk_id_queue: List[int] = None
-        pp_world_size = parallel_state.get_pipeline_model_parallel_world_size()
-        self.pipeline_full = self.num_microbatches >= 2 * pp_world_size - self.virtual_data_parallel_world_size
-        if not self.pipeline_full:
-            self.config.overlap_moe_expert_parallel_comm = False
-            logger.warning(f"Overlap_moe_expert_parallel_comm is not supported under the number of microbatches {self.num_microbatches}, set it to False")
-        if self.rank == 0:
-            logger.info(f">>>ChimeraScheduler finishes initialization.")
+        self.reorder_param_sync_funcs_flag = False
     
     def reset(self) -> None:
         # Model chunk IDs with synchronized grads
@@ -144,11 +146,55 @@ class ChimeraScheduler():
         self.current_recv_b_microbatch_id = [0 for _ in range(len(self.model))]
 
         self.comm_mgr.reset()
-        WeightGradStore.reset()
-        # Because flash attn only support with transformer engine, chimera scheduler disable decouple dw according to the transformer_impl, 
-        # looking forward support with local transformer impl.
-        self.enable_decouple_dw = self.config.transformer_impl != 'transformer_engine'
+        # Disable config.grad_sync_func and config.param_sync_func if only running forward passes.
+        # They will be re-enabled at the end of this function.
+        self.grad_sync_func, self.param_sync_func = None, None
+        if self.forward_only:
+            self.grad_sync_func, self.param_sync_func = self.config.grad_sync_func, self.config.param_sync_func
+            self.config.grad_sync_func, self.config.param_sync_func = None, None
+        if not self.first_run:
+            self.reorder_param_sync_funcs()
+
     
+    def reorder_models(self, model):
+        self.config = get_model_config(model[0])
+        self.ddp_config = model[0].ddp_config
+        if self.config.grad_sync_func is not None and not isinstance(self.config.grad_sync_func, list):
+            self.config.grad_sync_func = [self.config.grad_sync_func for _ in model]
+        vdp_size = self.virtual_data_parallel_world_size
+        tmp_models = [None] * vdp_size
+        tmp_no_sync_funcs = [None] * vdp_size
+        if self.config.grad_sync_func is not None:
+            tmp_grad_sync_funcs = [None] * vdp_size
+        else:
+            tmp_grad_sync_funcs = None
+        for i in range(vdp_size):
+            first_vdp_pp_stage = parallel_state.get_pp_stage_of_first_vdp_rank(i)
+            model_correct_idx = parallel_state.pipeline_stage_to_virtual_data_parallel_rank(first_vdp_pp_stage)
+            tmp_models[model_correct_idx] = model[i]
+            tmp_no_sync_funcs[model_correct_idx] = self.config.no_sync_func[i]
+            if tmp_grad_sync_funcs is not None:
+                tmp_grad_sync_funcs[model_correct_idx] = self.config.grad_sync_func[i]
+        self.model = tmp_models
+        self.config.no_sync_func = tmp_no_sync_funcs
+        self.config.grad_sync_func = tmp_grad_sync_funcs
+    
+    def reorder_param_sync_funcs(self):
+        if self.reorder_param_sync_funcs_flag:
+            return
+        vdp_size = self.virtual_data_parallel_world_size
+        if self.config.param_sync_func is not None:
+            tmp_param_sync_funcs = [None] * vdp_size
+        else:
+            tmp_param_sync_funcs = None
+        for i in range(vdp_size):
+            first_vdp_pp_stage = parallel_state.get_pp_stage_of_first_vdp_rank(i)
+            model_correct_idx = parallel_state.pipeline_stage_to_virtual_data_parallel_rank(first_vdp_pp_stage)
+            if tmp_param_sync_funcs is not None:
+                tmp_param_sync_funcs[model_correct_idx] = self.config.param_sync_func[i]
+        self.config.param_sync_func = tmp_param_sync_funcs
+        self.reorder_param_sync_funcs_flag = True
+
     def disable_grad_sync(self):
         """Disable asynchronous grad reductions"""
         if self.no_sync_context is None:
@@ -174,6 +220,7 @@ class ChimeraScheduler():
         if len(self.input_tensors[vdp_rank]) == self.current_f_microbatch_id[vdp_rank]:
             self.input_tensors[vdp_rank].append(None)
         input_tensor = self.input_tensors[vdp_rank][microbatch_id]
+        # print(f"[rank{self.rank}, vdp rank {vdp_rank}]: forward microbatch {microbatch_id}")
         return input_tensor
 
     def _forward_step_helper_postprocess(self, vdp_rank, output_tensor, num_tokens):
@@ -188,6 +235,7 @@ class ChimeraScheduler():
             self.input_tensors[vdp_rank][microbatch_id] = None
             self.output_tensors[vdp_rank][microbatch_id] = None
         self.current_f_microbatch_id[vdp_rank] += 1
+        # print(f"[rank{self.rank}, vp stage {vdp_rank}]: microbatch {microbatch_id} forward output = {output_tensor}")
         return
     
     def _backward_step_helper_preprocess(self, vdp_rank):
@@ -209,12 +257,16 @@ class ChimeraScheduler():
         self.input_tensors[vdp_rank][microbatch_id] = None
         self.output_tensors[vdp_rank][microbatch_id] = None
         self.output_tensor_grads[vdp_rank][microbatch_id] = None
-
+        self.current_b_microbatch_id[vdp_rank] += 1
+        if self._is_last_microbatch(vdp_rank) and self.config.grad_sync_func is None:
+            self.enable_grad_sync()
+            self.sync_model_queue.append(vdp_rank)
+            self.synchronized_model_chunks.add(vdp_rank)
+            logger.debug(f"[rank{self.rank}]: add model chunk {vdp_rank} to sync queue")
         return input_tensor, output_tensor, output_tensor_grad
 
     def _backward_step_helper_postprocess(self, vdp_rank, intput_tensor_grad):
         """Postprocess for backward_step_helper"""
-        self.current_b_microbatch_id[vdp_rank] += 1
         self.input_tensor_grads[vdp_rank].append(intput_tensor_grad)
     
     def _combined_1f1b_schedule_for_chimera(self, f_vdp_rank: Optional[int] = None, b_vdp_rank: Optional[int] = None) -> None:
@@ -274,7 +326,9 @@ class ChimeraScheduler():
     def _forward_step_helper(self, vdp_rank: int) -> None:
         # import here to avoid circle import
         from megatron.core.pipeline_parallel.schedules import forward_step
+        print(f"[rank{self.rank}, vdp rank {vdp_rank}]: checkpoint 1, before forward preprocess.")
         input_tensor = self._forward_step_helper_preprocess(vdp_rank)
+        print(f"[rank{self.rank}, vdp rank {vdp_rank}]: checkpoint 2, after forward preprocess.")
         microbatch_id = self.current_f_microbatch_id[vdp_rank]
 
         # doesn't support checkpoint_activations_microbatch yet
@@ -293,7 +347,9 @@ class ChimeraScheduler():
             vp_stage=vdp_rank,
             is_last_stage=parallel_state.is_pipeline_last_stage(ignore_virtual=False)
         )
+        print(f"[rank{self.rank}, vdp rank {vdp_rank}]: checkpoint 2, after forward.")
         self._forward_step_helper_postprocess(vdp_rank, output_tensor, num_tokens)
+        print(f"[rank{self.rank}, vdp rank {vdp_rank}]: checkpoint 2, after forward post process.")
 
     def _backward_step_helper(self, vdp_rank: int) -> None:
         from megatron.core.pipeline_parallel.schedules import backward_step
@@ -308,6 +364,7 @@ class ChimeraScheduler():
         parallel_state.set_virtual_data_parallel_rank(vdp_rank)
         if recv:
             self._recv_forward(vdp_rank)
+            print(f"[rank{self.rank}, vdp rank {vdp_rank}]: recv forward.")
         self.comm_mgr.commit()
         torch.cuda.nvtx.range_push(f"model_{vdp_rank}_mbc_{self.current_f_microbatch_id[vdp_rank] + vdp_rank * 10}_f")
         if self.config.overlap_moe_expert_parallel_comm:
@@ -382,7 +439,13 @@ class ChimeraScheduler():
             local_backward_dw()
         if commit:
             self.comm_mgr.wait()
-        self._maybe_start_sync(vdp_rank=vdp_rank)
+        if self.config.grad_sync_func is not None and self._is_last_microbatch(vdp_rank):
+            self.enable_grad_sync()
+            self.config.grad_sync_func[vdp_rank](self.model[vdp_rank].parameters())
+            self.sync_model_queue.append(vdp_rank)
+            self.synchronized_model_chunks.add(vdp_rank)
+            logger.debug(f"[rank{self.rank}]: add model chunk {vdp_rank} to sync queue")
+        self.disable_grad_sync()
 
     def _recv_forward(self, vdp_rank: int = None) -> None:
         parallel_state.set_virtual_data_parallel_rank(vdp_rank)
@@ -398,6 +461,7 @@ class ChimeraScheduler():
         parallel_state.set_virtual_data_parallel_rank(vdp_rank)
         is_last_stage = parallel_state.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vdp_rank)
         if is_last_stage:
+            print(f"[rank{self.rank}, vdp rank {vdp_rank}]: is last stage, donot send.")
             return
 
         microbatch_id = self.current_send_f_microbatch_id[vdp_rank]
@@ -405,6 +469,7 @@ class ChimeraScheduler():
         self.current_send_f_microbatch_id[vdp_rank] += 1
         tensor_to_comm = self.output_tensors[vdp_rank][microbatch_id]
         self.comm_mgr.send_forward(tensor_to_comm)
+        print(f"[rank{self.rank}, vdp rank {vdp_rank}]: send forward microbatch {microbatch_id}")
 
     def _recv_backward(self, vdp_rank: int = None) -> None:
         if self.forward_only:
@@ -471,6 +536,8 @@ class ChimeraScheduler():
         if len(self.synchronized_model_chunks) != len(self.sync_model_queue):
             raise RuntimeError(f"Invalid sync model sequence: {self.sync_model_queue}")
         for i in self.sync_model_queue:
+            logger.debug(f"[rank{self.rank}]: model chunk {i} finish grads sync")
+            parallel_state.set_virtual_data_parallel_rank(i)
             self.config.finalize_model_grads_func(
                 [self.model[i]], self.total_num_tokens if self.config.calculate_per_token_loss else None
             )
@@ -480,6 +547,9 @@ class ChimeraScheduler():
         Because the communication of multiple pipeline is complex, 
         reader can refence to the dualpipe
         """
+        # for i, model_chunk in enumerate(self.model):
+        #     for name, param in model_chunk.named_parameters():
+        #         print(f"[rank{self.rank}, vdp rank {model_chunk.vp_stage}]: before chimera scheduler, {name} = {param}")
         self.disable_grad_sync()
         is_middle_rank = ChimeraNode.is_middle_rank
         # Synchronize params for first model chunks
@@ -498,15 +568,18 @@ class ChimeraScheduler():
         F0F1_nodes = self.schedule["F0F1"]
         self_vdp = vdp_rank=F0F1_nodes[0].virtual_data_parallel_rank
         # If the pipeline is not full, all the microbatch need to send immediately.
-        exist_other_vdps = not self.pipeline_full
-        if not exist_other_vdps:
+        # Note that, the middle ranks are always full.
+        send_immediately = not self.pipeline_full
+        if not send_immediately:
             self._recv_forward(vdp_rank=F0F1_nodes[0].virtual_data_parallel_rank)    # dualpipe: recv_forward(0)
         for i in range(0, len(F0F1_nodes), 2):
             node0 = F0F1_nodes[i]
             node1 = F0F1_nodes[i + 1]
             vdp_rank0 = node0.virtual_data_parallel_rank
             vdp_rank1 = node1.virtual_data_parallel_rank
-            self._forward_with_comm(vdp_rank0, recv=exist_other_vdps, send=is_middle_rank or exist_other_vdps)
+            self._forward_with_comm(vdp_rank0, recv=send_immediately, send=is_middle_rank or send_immediately)
+            if not self.pipeline_full and i == 0:
+                self.comm_mgr.commit()
             # dualpipe recv_forward(0)
             if self.pipeline_full:
                 if i < len(F0F1_nodes) - 2:
@@ -514,19 +587,22 @@ class ChimeraScheduler():
                     if next_F_node.virtual_data_parallel_rank == self_vdp:
                         self._recv_forward(next_F_node.virtual_data_parallel_rank)
                     else:
-                        exist_other_vdps = True
+                        # Because the pipeline_full is True for middel ranks, so send_immediately is no use for middle rank.
+                        # When new vdp rank occurs, the forward result should be send immediately.
+                        if not is_middle_rank:
+                            send_immediately = True
                 else:
                     # recv next down pipeline
                     if len(self.schedule["F0B1F1B0"]) > 0:
                         self._recv_forward(self.schedule["F0B1F1B0"][0].virtual_data_parallel_rank)
             self._forward_with_comm(vdp_rank1, send=(not is_middle_rank) or (i < len(F0F1_nodes) - 2))
-            if not (is_middle_rank or exist_other_vdps):
+            if not (is_middle_rank or send_immediately):
                 self._send_forward(vdp_rank=vdp_rank0)
-        if self.pipeline_full:
-            if exist_other_vdps and not is_middle_rank:
+        # If the pipeline is full, and the vdp_size > 2, the send_immediately will be set in ranks except middle ranks.
+        # In this case, there is a self_vdp microbatch should be send to next stage.
+        # The corresponding code is provided in Line 596.
+        if self.pipeline_full and send_immediately:
                 self._send_forward(self_vdp)
-        else:
-            self._send_forward(F0F1_nodes[-1].virtual_data_parallel_rank)
 
         # Step 3: nB1W1F1
         logger.debug(f"[rank{self.rank}]: Step 3")
@@ -701,6 +777,10 @@ class ChimeraScheduler():
         if self.first_run:
             self.param_sync_model_chunk_id_queue = list(reversed(self.sync_model_queue))
             self.first_run = False
+        # print(f"[rank{self.rank}]: forward data store = {self.forward_data_store}")
+        # for i, model_chunk in enumerate(self.model):
+        #     for name, param in model_chunk.named_parameters():
+        #         print(f"[rank{self.rank}, vdp rank {model_chunk.vp_stage}]: after chimera scheduler, {name} = {param}")
         return self.forward_data_store
 
     def __call__(self, *args, **kwds):

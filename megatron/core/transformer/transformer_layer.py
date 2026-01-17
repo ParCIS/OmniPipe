@@ -503,6 +503,8 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
         # Residual connection.
         residual = hidden_states
+        rank = torch.distributed.get_rank()
+        # print(f"[rank{rank}]: before attn layernorm, hidden_states = {hidden_states}")
 
         # Optional Input Layer norm
         if self.recompute_input_layernorm:
@@ -512,7 +514,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             )
         else:
             input_layernorm_output = self.input_layernorm(hidden_states)
-
+        # print(f"[rank{rank}]: before forward attn, hidden_states = {input_layernorm_output}")
         # Self attention.
         nvtx_range_push(suffix="self_attention")
         attention_output_with_bias = self.self_attention(
@@ -537,12 +539,14 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
+        # print(f"[rank{rank}]: before attn bda, hidden_states = {attention_output_with_bias}")
         nvtx_range_push(suffix="self_attn_bda")
         with self.bias_dropout_add_exec_handler():
             hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
                 attention_output_with_bias, residual, self.hidden_dropout
             )
         nvtx_range_pop(suffix="self_attn_bda")
+        # print(f"[rank{rank}]: after attn bda, hidden_states = {hidden_states}")
 
         # Residual connection.
         residual = hidden_states
@@ -567,7 +571,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             hidden_states = self.cross_attn_bda(self.training, self.config.bias_dropout_fusion)(
                 attention_output_with_bias, residual, self.hidden_dropout
             )
-
+        # print(f"[rank{rank}]: finish forward attn, hidden_states = {hidden_states}")
         return hidden_states, context
 
     def _forward_mlp(self, hidden_states, inference_context=None):
@@ -583,6 +587,8 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
 
         # Residual connection.
         residual = hidden_states
+        rank = torch.distributed.get_rank()
+        # print(f"[rank{rank}]: before forward mlp layernorm, hidden_states = {hidden_states}")
 
         # Optional Layer norm post the cross-attention.
         if self.recompute_pre_mlp_layernorm:
@@ -594,6 +600,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             pre_mlp_layernorm_output = self.pre_mlp_layernorm(hidden_states)
 
         nvtx_range_push(suffix="mlp")
+        # print(f"[rank{rank}]: before forward mlp, hidden_states = {hidden_states}")
         # Potentially chunk the MLP computation during prefill to minimize the peak activation size
         should_chunk_mlp_for_prefill = (
             self.config.mlp_chunks_for_prefill > 1
@@ -646,6 +653,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         # TODO: could we move `bias_dropout_add_exec_handler` itself
         # inside the module provided in the `bias_dropout_add_spec` module?
         nvtx_range_push(suffix="mlp_bda")
+        # print(f"[rank{rank}]: before forward mlp bda, hidden_states = {mlp_output_with_bias}")
         with self.bias_dropout_add_exec_handler():
             hidden_states = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
                 mlp_output_with_bias, residual, self.hidden_dropout
@@ -661,7 +669,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         output = make_viewless_tensor(
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True
         )
-
+        # print(f"[rank{rank}]: finish forward mlp, hidden_states = {hidden_states}")
         return output
 
     def sharded_state_dict(

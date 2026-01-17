@@ -108,7 +108,6 @@ class DualPipeScheduler():
             deallocate_fn=partial(deallocate_output_tensor, deallocate_pipeline_outputs=self.config.deallocate_pipeline_outputs),
             virtual_data_parallel_world_size=self.virtual_data_parallel_world_size
         )
-        assert num_microbatches >= parallel_state.get_pipeline_model_parallel_world_size() * 2 - 2, f"DualPipe only support num_microbatches >= 2 * PP - 2, num_microbatches = {num_microbatches}"
         if self.rank == 0:
             logger.info(f">>>DualPipeScheduler finishes initialization.")
 
@@ -202,15 +201,28 @@ class DualPipeScheduler():
         self.input_tensors[vdp_rank][microbatch_id] = None
         self.output_tensors[vdp_rank][microbatch_id] = None
         self.output_tensor_grads[vdp_rank][microbatch_id] = None
+        self.current_b_microbatch_id[vdp_rank] += 1
+        if self._is_last_microbatch(vdp_rank) and self.config.grad_sync_func is None:
+            self.enable_grad_sync()
+            self.sync_model_queue.append(vdp_rank)
+            self.synchronized_model_chunks.add(vdp_rank)
+            logger.debug(f"[rank{self.rank}]: add model chunk {vdp_rank} to sync queue")
 
         return input_tensor, output_tensor, output_tensor_grad
 
-    def _backward_step_helper_postprocess(self, vdp_rank, intput_tensor_grad):
+    def _backward_step_helper_postprocess(self, phase, intput_tensor_grad):
         """Postprocess for backward_step_helper"""
-        self.current_b_microbatch_id[vdp_rank] += 1
-        self.input_tensor_grads[vdp_rank].append(intput_tensor_grad)
+        self.input_tensor_grads[phase].append(intput_tensor_grad)
+        if self.config.grad_sync_func is not None and self._is_last_microbatch(phase):
+            self.enable_grad_sync()
+            self.config.grad_sync_func[phase](self.model[phase].parameters())
+            self.sync_model_queue.append(phase)
+            self.synchronized_model_chunks.add(phase)
+            logger.debug(f"[rank{self.rank}]: add model chunk {phase} to sync queue")
+        self.disable_grad_sync()
     
     def _forward_compute_chunk(self, phase: int) -> None:
+        phase ^= self.is_in_second_half
         parallel_state.set_virtual_data_parallel_rank(phase)
         from megatron.core.pipeline_parallel.schedules import forward_step
         input_tensor = self._forward_step_helper_preprocess(phase)
@@ -237,18 +249,18 @@ class DualPipeScheduler():
     def _backward_compute_chunk(self, phase: int, enable_zb: bool = False) -> None:
         if self.forward_only:
             return
+        phase ^= self.is_in_second_half
         parallel_state.set_virtual_data_parallel_rank(phase)
         from megatron.core.pipeline_parallel.schedules import backward_step
         if self.forward_only:
             return
         input_tensor, output_tensor, output_tensor_grad = self._backward_step_helper_preprocess(phase)
-        self.set_decouple_dw(phase, enable_zb)
+        self.set_split_dw(phase, enable_zb)
         input_tensor_grad = backward_step(input_tensor, output_tensor, output_tensor_grad, self.model_type, self.config)
-        self._backward_step_helper_postprocess(phase, input_tensor_grad)
-        self.set_decouple_dw(phase, False)
+        self.set_split_dw(phase, False)
         if not enable_zb:
             self.current_w_microbatch_id[phase] += 1
-            self._maybe_start_sync(phase)
+        self._backward_step_helper_postprocess(phase, input_tensor_grad)
         return input_tensor_grad
 
     def _forward_backward_compute_chunk(self, phase0: int, phase1: int, enable_zb: bool = False) -> None:
@@ -273,7 +285,7 @@ class DualPipeScheduler():
         if phase1 is not None:
             phase1 ^= self.is_in_second_half
             parallel_state.set_virtual_data_parallel_rank(phase1)
-            self.set_decouple_dw(phase1, enable_zb)
+            self.set_split_dw(phase1, enable_zb)
             b_input_tensor, b_output_tensor, b_output_tensor_grad = self._backward_step_helper_preprocess(phase1)
         # Call combined forward and backward step to overlap the communication and computation
         output_tensor, num_tokens, input_tensor_grad = combined_forward_backward_step(
@@ -305,10 +317,10 @@ class DualPipeScheduler():
         # backward post process
         if phase1 is not None:
             # The same as the backward_step_helper
-            self._backward_step_helper_postprocess(phase1, input_tensor_grad)
+            self.set_split_dw(phase1, False)
             if not enable_zb:
                 self.current_w_microbatch_id[phase1] += 1
-                self._maybe_start_sync(phase1)
+            self._backward_step_helper_postprocess(phase1, input_tensor_grad)
         return output_tensor, num_tokens, input_tensor_grad
 
     def _forward_chunk(self, phase: int, recv: bool = True, send: bool = True) -> None:
@@ -349,20 +361,28 @@ class DualPipeScheduler():
         self._send_forward(phase0)
         self._send_backward(phase1)
     
-    def set_decouple_dw(self, phase: int, enable: bool = True):
+    def set_split_dw(self, phase: int, enable: bool = True):
         def te_set(enable):
             model_wrapped = self.model[phase]
             decoder = get_attr_wrapped_model(model_wrapped, "decoder")
             transformer_layers = decoder.layers
             for layer in transformer_layers:
                 if enable:
-                    layer.mlp.experts.linear_fc1.wgrad_store.enable_delay_wgrad_compute()
-                    layer.mlp.experts.linear_fc2.wgrad_store.enable_delay_wgrad_compute()
+                    if hasattr(layer.mlp, "experts"):
+                        layer.mlp.experts.linear_fc1.wgrad_store.enable_delay_wgrad_compute()
+                        layer.mlp.experts.linear_fc2.wgrad_store.enable_delay_wgrad_compute()
+                    else:
+                        layer.mlp.linear_fc1.wgrad_store.enable_delay_wgrad_compute()
+                        layer.mlp.linear_fc2.wgrad_store.enable_delay_wgrad_compute()
                     layer.self_attention.linear_qkv.wgrad_store.enable_delay_wgrad_compute()
                     layer.self_attention.linear_proj.wgrad_store.enable_delay_wgrad_compute()
                 else:
-                    layer.mlp.experts.linear_fc1.wgrad_store.disable_delay_wgrad_compute()
-                    layer.mlp.experts.linear_fc2.wgrad_store.disable_delay_wgrad_compute()
+                    if hasattr(layer.mlp, "experts"):
+                        layer.mlp.experts.linear_fc1.wgrad_store.disable_delay_wgrad_compute()
+                        layer.mlp.experts.linear_fc2.wgrad_store.disable_delay_wgrad_compute()
+                    else:
+                        layer.mlp.linear_fc1.wgrad_store.disable_delay_wgrad_compute()
+                        layer.mlp.linear_fc2.wgrad_store.disable_delay_wgrad_compute()
                     layer.self_attention.linear_qkv.wgrad_store.disable_delay_wgrad_compute()
                     layer.self_attention.linear_proj.wgrad_store.disable_delay_wgrad_compute()
         def local_set(enable):
@@ -394,11 +414,19 @@ class DualPipeScheduler():
         self.comm_mgr.commit()
 
         # Assume FIFO
+        self.set_split_dw(phase, True)
         if self.config.transformer_impl == 'transformer_engine':
             te_backward_dw(phase)
         else:
             local_backward_dw()
-        self._maybe_start_sync(vdp_rank=phase)
+        self.set_split_dw(phase, False)
+        if self.config.grad_sync_func is not None and self._is_last_microbatch(phase):
+            self.enable_grad_sync()
+            self.config.grad_sync_func[phase](self.model[phase].parameters())
+            self.sync_model_queue.append(phase)
+            self.synchronized_model_chunks.add(phase)
+            logger.debug(f"[rank{self.rank}]: add model chunk {phase} to sync queue")
+        self.disable_grad_sync()
 
 
     def _recv_forward(self, phase: int) -> None:

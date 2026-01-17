@@ -133,6 +133,14 @@ _VIRTUAL_DATA_PARALLEL_SIZE = None
 # chimera virtual data parallel rank
 _VIRTUAL_DATA_PARALLEL_RANK = None
 
+# chimera relative pp rank
+_RELATIVE_PIPELINE_RANK = None
+
+# chimera map virtual data parallel rank to pipeline rank
+_LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = None
+_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = None
+_DATA_PARALLEL_GLOBAL_RANKS_SORTED = None
+
 def get_nccl_options(pg_name, nccl_comm_cfgs):
     """Set the NCCL process group options.
 
@@ -489,6 +497,7 @@ def initialize_model_parallel(
     create_gloo_process_groups: bool = True,
     high_priority_stream_groups: Optional[List[str]] = None,
     sharp_enabled_group: Optional[str] = None,
+    virtual_data_parallel_size: Optional[int] = None,
 ) -> None:
     """Initialize model data parallel groups.
 
@@ -1243,6 +1252,160 @@ def initialize_model_parallel(
     # we could stick it there
     _set_global_memory_buffer()
 
+    # Init chimera parallel_state
+    def init_chimera_parallel_state():
+        """
+        Initialize Chimera parallel groups.
+        Note that some communication of M-core doesn't use yet, so we don't patch them here
+        """
+        global _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP
+        global _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP
+        global _DATA_PARALLEL_GLOBAL_RANKS
+        global _DATA_PARALLEL_GROUP
+        global _DATA_PARALLEL_GLOBAL_RANKS_WITH_CP
+        global _DATA_PARALLEL_GROUP_WITH_CP
+        global _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP
+        global _EXPERT_MODEL_PARALLEL_GROUP
+        global _EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP
+        global _EXPERT_DATA_PARALLEL_GROUP
+        global _EMBEDDING_GROUP
+        global _EMBEDDING_GLOBAL_RANKS
+        global _VIRTUAL_DATA_PARALLEL_SIZE
+        global _RELATIVE_PIPELINE_RANK
+        global _DATA_PARALLEL_GLOBAL_RANKS_SORTED
+        pp = pipeline_model_parallel_size
+        tp = tensor_model_parallel_size
+        etp = expert_tensor_parallel_size
+        if etp is None:
+            etp = tp
+        cp = context_parallel_size
+        ep = expert_model_parallel_size
+        world_size = torch.distributed.get_world_size()
+        global_rank = torch.distributed.get_rank()
+        dp = world_size // (pp * tp)
+        edp = world_size // (pp * etp * ep)
+        vdp = virtual_data_parallel_size
+
+        num_devices_per_stage = world_size // pp
+        num_dp_group_per_stage = num_devices_per_stage // dp
+        num_dp_cp_group_per_stage = num_devices_per_stage // (dp * cp)
+        num_ep_group_per_stage = num_devices_per_stage // ep
+        num_ep_tp_group_per_stage = num_devices_per_stage // (ep * tp)
+        num_edp_group_per_stage = num_devices_per_stage // edp
+
+        dp_ranks_list = []
+        dp_cp_ranks_list = []
+        ep_ranks_list = []
+        ep_tp_ranks_list = []
+        edp_ranks_list = []
+
+        for ranks_with_cp in decoder_rank_generator.get_ranks('dp-cp'):
+            dp_cp_ranks_list.append(ranks_with_cp)
+        for ranks in decoder_rank_generator.get_ranks('dp'):
+            dp_ranks_list.append(ranks)
+        for ranks in expert_decoder_rank_generator.get_ranks('ep'):
+            ep_ranks_list.append(ranks)
+        for ranks in expert_decoder_rank_generator.get_ranks('tp-ep'):
+            ep_tp_ranks_list.append(ranks)
+        for ranks in expert_decoder_rank_generator.get_ranks('dp'):
+            edp_ranks_list.append(ranks)
+
+        offset_unit = pp // vdp * 2
+        device_count = torch.cuda.device_count()
+        if ep > device_count or world_size <= device_count:
+            extend_vdp_to_ep = True
+        else:
+            extend_vdp_to_ep = False
+        
+        # Constructe local map of vdp rank to pp stage
+        pp_rank = global_rank // num_devices_per_stage
+        dual_pp_rank = pp -1 - pp_rank
+        if pp_rank < pp //2:
+            pp_ranks = [i for i in range(pp_rank, pp, offset_unit)] + [i for i in range(dual_pp_rank, -1, -offset_unit)]
+        else:
+            pp_ranks = [i for i in range(pp_rank, -1, -offset_unit)] + [i for i in range(dual_pp_rank, pp, offset_unit)]
+        _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = pp_ranks
+        is_dual_rank = False if ((pp_rank % offset_unit) < (offset_unit // 2)) else True
+        is_dual_rank = is_dual_rank
+        if is_dual_rank:
+            _RELATIVE_PIPELINE_RANK = (offset_unit - 1 - pp_rank % offset_unit)
+        else:
+            _RELATIVE_PIPELINE_RANK = pp_rank % offset_unit
+        print(f">>> [rank{global_rank}]: Chimera local virtual data parallel rank to pipeline rank map = {pp_ranks}, relative rank = {_RELATIVE_PIPELINE_RANK}")
+        
+        for pp_rank in range(pp // vdp):
+            dual_pp_rank = pp - 1 - pp_rank
+            pp_ranks = [i for i in range(pp_rank, pp, offset_unit)] + [i for i in range(dual_pp_rank, -1, -offset_unit)]
+            if global_rank in pp_ranks:
+                _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = pp_ranks
+                print(f">>> [rank{global_rank}]: Chimera global virtual data parallel rank to pipeline rank map = {pp_ranks}")
+
+            # constructe new dp groups
+            for i in range(num_dp_group_per_stage):
+                new_dp_ranks = []
+                for pp_r in pp_ranks:
+                    new_dp_ranks.extend(dp_ranks_list[pp_r * num_dp_group_per_stage + i])
+                new_dp_group = create_group(new_dp_ranks, timeout=timeout, pg_options=get_nccl_options("dp", nccl_comm_cfgs))
+                if global_rank in new_dp_ranks:
+                    _DATA_PARALLEL_GLOBAL_RANKS = new_dp_ranks
+                    _DATA_PARALLEL_GLOBAL_RANKS_SORTED = sorted(new_dp_ranks)
+                    _DATA_PARALLEL_GROUP = new_dp_group
+            
+            # construct new dp-cp groups
+            for i in range(num_dp_cp_group_per_stage):
+                new_dp_cp_ranks = []
+                for pp_r in pp_ranks:
+                    new_dp_cp_ranks.extend(dp_cp_ranks_list[pp_r * num_dp_cp_group_per_stage + i])
+                new_dp_cp_group = create_group(new_dp_cp_ranks, timeout=timeout, pg_options=get_nccl_options("dp-cp", nccl_comm_cfgs))
+                if global_rank in new_dp_cp_ranks:
+                    _DATA_PARALLEL_GLOBAL_RANKS_WITH_CP = new_dp_cp_ranks
+                    _DATA_PARALLEL_GROUP_WITH_CP = new_dp_cp_group
+                    # no use, just to be compatible with mcore
+                    _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP = new_dp_cp_group
+            if extend_vdp_to_ep:
+                # construct new ep groups
+                for i in range(num_ep_group_per_stage):
+                    new_ep_ranks = []
+                    for pp_r in pp_ranks:
+                        new_ep_ranks.extend(ep_ranks_list[pp_r * num_ep_group_per_stage + i])
+                    new_ep_group = create_group(new_ep_ranks, timeout=timeout, pg_options=get_nccl_options("ep", nccl_comm_cfgs))
+                    if global_rank in new_ep_ranks:
+                        _EXPERT_MODEL_PARALLEL_GROUP = new_ep_group
+                # construct new ep-tp groups
+                for i in range(num_ep_tp_group_per_stage):
+                    new_ep_tp_ranks = []
+                    for pp_r in pp_ranks:
+                        new_ep_tp_ranks.extend(ep_tp_ranks_list[pp_r * num_ep_tp_group_per_stage + i])
+                    new_ep_tp_group = create_group(new_ep_tp_ranks, timeout=timeout, pg_options=get_nccl_options("ep-tp-mp", nccl_comm_cfgs))
+                    if global_rank in new_ep_tp_ranks:
+                        _EXPERT_TENSOR_AND_MODEL_PARALLEL_GROUP = new_ep_tp_group
+            else:
+                # construct new ep-dp groups
+                for i in range(num_edp_group_per_stage):
+                    new_ep_dp_ranks = []
+                    for pp_r in pp_ranks:
+                        new_ep_dp_ranks.extend(edp_ranks_list[pp_r * num_edp_group_per_stage + i])
+                    new_ep_dp_group = create_group(new_ep_dp_ranks, timeout=timeout, pg_options=get_nccl_options("ep-dp", nccl_comm_cfgs))
+                    if global_rank in new_ep_dp_ranks:
+                        _EXPERT_DATA_PARALLEL_GROUP = new_ep_dp_group
+            
+        # construct embedding groups
+        for vdp_rank in range(vdp // 2):
+            first_stage_rank = offset_unit * vdp_rank
+            last_stage_rank = pp - 1 - offset_unit * vdp_rank
+            for rank in range(num_devices_per_stage):
+                global_first_stage_rank = first_stage_rank * num_devices_per_stage + rank
+                global_last_stage_rank = last_stage_rank * num_devices_per_stage + rank
+                embedding_ranks = [global_first_stage_rank, global_last_stage_rank]
+                embedding_group = create_group(embedding_ranks, timeout=timeout, pg_options=get_nccl_options("embedding", nccl_comm_cfgs))
+                if global_rank in embedding_ranks:
+                    _EMBEDDING_GROUP = embedding_group
+                    _EMBEDDING_GLOBAL_RANKS = embedding_ranks
+        _VIRTUAL_DATA_PARALLEL_SIZE = vdp
+        if global_rank == 0 and extend_vdp_to_ep:
+            print(f">>> Set expert model parallel size to {ep * vdp}")
+    if virtual_data_parallel_size is not None:
+        init_chimera_parallel_state()
 
 def is_initialized():
     """Useful for code segments that may be accessed with or without mpu initialization"""
@@ -1945,6 +2108,91 @@ def set_virtual_data_parallel_rank(rank):
     """Set the virtual data-parallel rank."""
     global _VIRTUAL_DATA_PARALLEL_RANK
     _VIRTUAL_DATA_PARALLEL_RANK = rank
+
+
+def get_pp_stage_of_first_vdp_rank(vdp_rank: int):
+    global _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP
+    assert _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP is not None, "Virtual data parallel is not initialized."
+    return _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP[vdp_rank]
+
+
+def virtual_data_parallel_rank_to_pipeline_stage(vdp_rank: int = None):
+    """
+    When enable virtual data parallel, a map will be initialized to record the pipeline stage to its virtual data parallel rank in every rank respectively.
+    For example,
+        PP8, DP1, VDP 2 in 8 devices.
+        vdp_rank 0: [0, 1, 2, 3, 4, 5, 6, 7]
+        vdp_rank 1: [7, 6, 5, 4, 3, 2, 1, 0]
+
+        RECORD: [vdp_rank 0, vdp_rank 1]
+            rank 0: [0, 7]
+            rank 1: [1, 6]
+            rank 2: [2, 5]
+            rank 3: [3, 4]
+            rank 4: [4, 3]
+            rank 5: [5, 2]
+            rank 6: [6, 1]
+            rank 7: [7, 0]
+        Give the vdp_rank, return the relative pipeline stage.
+    """
+    global _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP
+    assert _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP is not None, "Virtual data pipeline is not initialized."
+    if vdp_rank is None:
+        vdp_rank = get_virtual_data_parallel_rank()
+    return _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP[vdp_rank]
+
+# Chimera pipeline
+def pipeline_stage_to_virtual_data_parallel_rank(pp_rank: int = None):
+    """
+    When enable virtual data parallel, a map will be initialized to record the pipeline stage to its virtual data parallel rank in every rank respectively.
+    For example,
+        PP8, DP1, VDP 2 in 8 devices.
+        vdp_rank 0: [0, 1, 2, 3, 4, 5, 6, 7]
+        vdp_rank 1: [7, 6, 5, 4, 3, 2, 1, 0]
+
+        RECORD: [vdp_rank 0, vdp_rank 1]
+            rank 0: [0, 7]
+            rank 1: [1, 6]
+            rank 2: [2, 5]
+            rank 3: [3, 4]
+            rank 4: [4, 3]
+            rank 5: [5, 2]
+            rank 6: [6, 1]
+            rank 7: [7, 0]
+        Give the pipeline stage, return the relative vdp_rank.
+    """
+    global _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP
+    assert _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP is not None, "Virtual data pipeline is not initialized."
+    if pp_rank is None:
+        pp_rank = get_pipeline_model_parallel_rank()
+    return _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP.index(pp_rank)
+
+
+def get_pp_ranks_of_vdp_replicas() -> List[int]:
+    global _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP
+    assert _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP is not None, "Virtual data pipeline is not initialized."
+    return _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP
+
+# Chimera pipeline's pipeline rank
+def get_relative_pipeline_rank() -> int:
+    global _RELATIVE_PIPELINE_RANK
+    return _RELATIVE_PIPELINE_RANK
+
+
+def set_relative_pipeline_rank(relative_pipeline_rank: int):
+    global _RELATIVE_PIPELINE_RANK
+    _RELATIVE_PIPELINE_RANK = relative_pipeline_rank
+
+
+def get_global_dp_rank_in_vdp_group(vdp_rank: int):
+    global _DATA_PARALLEL_GLOBAL_RANKS, _DATA_PARALLEL_GLOBAL_RANKS_SORTED
+    assert _VIRTUAL_DATA_PARALLEL_SIZE is not None, "Virtual data parallel is not initialized."
+    ori_dp_size = len(_DATA_PARALLEL_GLOBAL_RANKS) // _VIRTUAL_DATA_PARALLEL_SIZE
+    cur_global_rank = torch.distributed.get_rank()
+    cur_rank_idx = (_DATA_PARALLEL_GLOBAL_RANKS.index(cur_global_rank)) % ori_dp_size
+    global_rank = _DATA_PARALLEL_GLOBAL_RANKS[ori_dp_size * vdp_rank + cur_rank_idx]
+    return _DATA_PARALLEL_GLOBAL_RANKS_SORTED.index(global_rank)
+    
 
 def destroy_model_parallel():
     """Set the groups to none."""

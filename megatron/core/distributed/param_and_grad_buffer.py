@@ -84,7 +84,9 @@ class _ParamAndGradBucket:
         numel_unpadded: int,
         gradient_scaling_factor: float,
         bucket_id: int,
+        vp_stage: int
     ):
+        self.vp_stage = vp_stage
         self.params_list = params
         self.params = set(params)
         # Make sure there are no duplicate params.
@@ -524,7 +526,9 @@ class _ParamAndGradBuffer:
         gradient_scaling_factor: float,
         param_indices: List[int],
         nccl_ub: bool,
+        vp_stage: int
     ):
+        self.vp_stage = vp_stage
         self.ddp_config = ddp_config
         self.params = params
         self.param_indices = param_indices
@@ -843,6 +847,7 @@ class _ParamAndGradBuffer:
             numel_unpadded=numel_unpadded,
             gradient_scaling_factor=self.gradient_scaling_factor,
             bucket_id=bucket_id,
+            vp_stage=self.vp_stage
         )
         for bucket_param in bucket_params:
             assert bucket_param not in self.param_to_bucket

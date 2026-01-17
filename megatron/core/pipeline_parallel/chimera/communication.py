@@ -34,6 +34,8 @@ class CommunicationManager:
         self.num_microbatches_per_vdp_rank = num_microbatches // virtual_data_parallel_world_size
 
         self.p2p_ops: List[dist.P2POp] = []
+        self.send_ops: List[dist.P2POp] = []
+        self.recv_ops: List[dist.P2POp] = []
         self.comm_info_for_debug = []
         self.to_free: List[torch.Tensor] = []
         self.rank = dist.get_rank()
@@ -41,6 +43,7 @@ class CommunicationManager:
         self.send_backward_microbatch_id: List[int] = [0 for _ in range(virtual_data_parallel_world_size)]
         self.recv_forward_microbatch_id: List[int] = [0 for _ in range(virtual_data_parallel_world_size)]
         self.recv_backward_microbatch_id: List[int] = [0 for _ in range(virtual_data_parallel_world_size)]
+        self.recv_buffers = []
     
     def _generate_unique_tag(self, src_global_rank: int, direction: int, vdp_rank: int, microbatch_id: int):
         """
@@ -66,7 +69,7 @@ class CommunicationManager:
         # just for debug
         self.comm_info_for_debug.append(("send_forward", self.rank, dst, vdp_rank * 10 + self.send_forward_microbatch_id[vdp_rank]))
         self.send_forward_microbatch_id[vdp_rank] += 1
-        self.p2p_ops.append(dist.P2POp(dist.isend, tensor_to_send, dst, tag=tag))
+        self.send_ops.append(dist.P2POp(dist.isend, tensor_to_send, dst, tag=tag))
         self.to_free.append(tensor_to_send)
     
     def recv_forward(self):
@@ -76,7 +79,8 @@ class CommunicationManager:
         self.comm_info_for_debug.append(("recv_forward", src, self.rank, vdp_rank * 10 + self.recv_forward_microbatch_id[vdp_rank]))
         self.recv_forward_microbatch_id[vdp_rank] += 1
         buffer = torch.zeros(self.tensor_shape, device=torch.cuda.current_device(), requires_grad=True, dtype=self.tensor_dtype)
-        self.p2p_ops.append(dist.P2POp(dist.irecv, buffer, src, tag=tag))
+        self.recv_ops.append(dist.P2POp(dist.irecv, buffer, src, tag=tag))
+        self.recv_buffers.append(buffer)
         return buffer
 
     def send_backward(self, tensor_to_send: torch.Tensor):
@@ -85,7 +89,7 @@ class CommunicationManager:
         tag = self._generate_unique_tag(src_global_rank=self.rank, direction=0, vdp_rank=vdp_rank, microbatch_id=self.send_backward_microbatch_id[vdp_rank])
         self.comm_info_for_debug.append(("send_backward", self.rank, dst, vdp_rank * 10 + self.send_backward_microbatch_id[vdp_rank]))
         self.send_backward_microbatch_id[vdp_rank] += 1
-        self.p2p_ops.append(dist.P2POp(dist.isend, tensor_to_send, dst, tag=tag))
+        self.send_ops.append(dist.P2POp(dist.isend, tensor_to_send, dst, tag=tag))
         tensor_to_send = None
     
     def recv_backward(self):
@@ -95,23 +99,31 @@ class CommunicationManager:
         self.comm_info_for_debug.append(("recv_backward", src, self.rank, vdp_rank * 10 + self.recv_backward_microbatch_id[vdp_rank]))
         self.recv_backward_microbatch_id[vdp_rank] += 1
         buffer = torch.zeros(self.tensor_shape, device=torch.cuda.current_device(), requires_grad=True, dtype=self.tensor_dtype)
-        self.p2p_ops.append(dist.P2POp(dist.irecv, buffer, src, tag=tag))
+        self.recv_ops.append(dist.P2POp(dist.irecv, buffer, src, tag=tag))
+        self.recv_buffers.append(buffer)
         return buffer
 
     def commit(self, wait: bool = True):
+        if self.rank % 2 == 1:
+            self.p2p_ops = self.send_ops + self.recv_ops
+        else:
+            self.p2p_ops = self.recv_ops + self.send_ops
         if len(self.p2p_ops) == 0:
+            print(f"[rank{self.rank}]: len of p2p ops = 0.")
             return
-        logger.debug(f"[rank {self.rank}]: commit p2p ops: {self.comm_info_for_debug}")
+        logger.debug(f"[rank {self.rank}]: commit p2p ops: {self.comm_info_for_debug}, p2p_ops = {self.p2p_ops}")
         self.reqs = dist.batch_isend_irecv(self.p2p_ops)
         self.comm_info_for_debug = []
         if wait:
             self.wait()
-        logger.debug(f"[rank {self.rank}]: wait all")
     
     def wait(self):
         for req in self.reqs:
             req.wait()
+        logger.debug(f"[rank {self.rank}]: wait all")
         self.p2p_ops: List[dist.P2POp] = []
+        self.send_ops = []
+        self.recv_ops = []
         for t in self.to_free:
             self.deallocate_fn(t)
         self.to_free: List[torch.Tensor] = []

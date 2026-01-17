@@ -18,8 +18,7 @@ from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 from .log_handler import CustomHandler
 
 # Make default logging level INFO, but filter out all log messages not from MCore.
-log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
-logging.basicConfig(handlers=[CustomHandler()], level=log_level)
+logging.basicConfig(handlers=[CustomHandler()], level=logging.INFO)
 from .theoretical_memory_usage import report_theoretical_memory
 import time
 
@@ -827,6 +826,35 @@ def update_train_iters(args):
     print_rank_0(f'setting training iterations to {args.train_iters}')
 
 
+def create_fixed_normal_inplace(param, target_mean: float):
+    """
+    原地初始化参数为：指定均值 + 标准差=1.0 的固定正态分布
+    :param param: 待初始化的模型参数
+    :param target_mean: 你指定的目标均值（如 rank*0.01）
+    """
+    shape = param.shape
+    device = param.device
+    dtype = param.dtype
+
+    # 1. 生成绝对固定的常量矩阵（无随机、无种子）
+    fixed_const = torch.arange(
+        torch.prod(torch.tensor(shape)),
+        device=device,
+        dtype=dtype
+    ).reshape(shape)
+
+    # 2. 归一化：强制均值=0，标准差=1（纯数学计算，无随机）
+    fixed_const = fixed_const - fixed_const.mean()  # 去中心化
+    std = fixed_const.std()
+    fixed_const = fixed_const / std  # 标准化（标准差=1）
+
+    # 3. 平移到目标均值：标准差保持1不变
+    fixed_const = fixed_const + target_mean  # 核心修改：只加均值，不乘系数
+
+    # 4. 原地写入param.data，保留所有属性（梯度/钩子/内存连续）
+    param.data.copy_(fixed_const)
+
+
 def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap_with_ddp=True):
     """Build the model."""
     args = get_args()
@@ -837,8 +865,8 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             from megatron.core.pipeline_parallel.dualpipe import init_dualpipe_parallel_state
             init_dualpipe_parallel_state()
         else:
-            from megatron.core.pipeline_parallel.chimera import init_chimera_parallel_state
-            init_chimera_parallel_state()
+            from megatron.core.pipeline_parallel.chimera import update_global_config_for_chimera
+            update_global_config_for_chimera(args)
     # Build model.
     def build_model():
         if (
@@ -847,7 +875,12 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         ):
             model = []
             vp_world_size = args.virtual_pipeline_model_parallel_size or args.virtual_data_parallel_size
+            enable_vdp = args.virtual_data_parallel_size is not None
             for i in range(vp_world_size):
+                # If enable vdp, adjust the sequence of vp_stage to keep the random initialize same parameters.
+                if enable_vdp:
+                    pp_stage = mpu.get_pp_stage_of_first_vdp_rank(i)
+                    i = mpu.pipeline_stage_to_virtual_data_parallel_rank(pp_stage)
                 # Set pre_process and post_process only after virtual rank is set.
                 pre_process = mpu.is_pipeline_first_stage(ignore_virtual=False, vp_stage=i)
                 post_process = mpu.is_pipeline_last_stage(ignore_virtual=False, vp_stage=i)
@@ -904,7 +937,16 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     ):
         for model_module in model:
             model_module.cuda(torch.cuda.current_device())
-
+    if args.virtual_data_parallel_size is not None:
+        fill_value = [[0.0, 0.0007], [0.0001, 0.0006], [0.0002, 0.0005], [0.0003, 0.0004], [0.0004, 0.0003], [0.0005, 0.0002], [0.0006, 0.0001], [0.0007, 0.0]]
+    elif args.virtual_pipeline_model_parallel_size is not None:
+        fill_value = [[0.0, 0.0004], [0.0, 0.0004], [0.0001, 0.0005], [0.0001, 0.0005], [0.0002, 0.0006], [0.0002, 0.0006], [0.0003, 0.0007], [0.0003, 0.0007]]
+    rank = torch.distributed.get_rank()
+    # for i, model_chunk in enumerate(model):
+    #     for name, param in model_chunk.named_parameters():
+    #         # param.data.fill_(fill_value[rank][model_chunk.vp_stage])
+    #         # torch.nn.init.normal_(param, mean=fill_value[rank][model_chunk.vp_stage])
+    #         create_fixed_normal_inplace(param, fill_value[rank][model_chunk.vp_stage])
     # Fp16 conversion.
     if args.fp16 or args.bf16:
         config = get_model_config(model[0])
@@ -966,32 +1008,29 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             if not ddp_config.overlap_grad_reduce:
                 ddp_config.bucket_size = None
 
-        if args.overlap_param_gather_with_optimizer_step:
-            disable_bucketing = [True] * len(model)
-        elif args.virtual_data_parallel_size is not None:
-            disable_bucketing = [True] * (len(model) - 1) + [False]
-        else:
-            disable_bucketing = [False] + [True] * (len(model) - 1)
         with torch.cuda.stream(torch.cuda.Stream()):
             model = [
                 DP(
                     config=config,
                     ddp_config=ddp_config,
                     module=model_chunk,
+                    vp_stage=model_chunk.vp_stage,
                     # Turn off bucketing for model_chunk 2 onwards, since communication for these
                     # model chunks is overlapped with compute anyway.
                     disable_bucketing=(model_chunk_idx > 0)
                     or args.overlap_param_gather_with_optimizer_step
-                    or args.virtual_data_parallel_size is not None
                 )
                 for (model_chunk_idx, model_chunk) in enumerate(model)
             ]
 
         # Broadcast params from data parallel src rank to other data parallel ranks.
         if args.data_parallel_random_init:
-            for model_module in model:
+            for model_module in model:                 
                 model_module.broadcast_params()
-    print(f"[rank{torch.distributed.get_rank()}]: {model}, num_parameters  = {num_parameters}", flush=True)
+    for model_chunk in model:
+        for buffer in model_chunk.buffers + model_chunk.expert_parallel_buffers:
+                for bucket in buffer.buckets:
+                    print(f"[rank{rank}, vdp rank {model_chunk.vp_stage}]: bucket.param = {bucket.param_data}, bucket.grad = {bucket.grad_data}")
     return model
 
 
@@ -1265,7 +1304,14 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     # Update parameters.
 
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
+    rank = torch.distributed.get_rank()
+    # for i, model_chunk in enumerate(model):
+    #     for name, param in model_chunk.named_parameters():
+    #         print(f"[rank{rank}, vdp rank {model_chunk.vp_stage}]: before optimizer, {name} = {param}")
     update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+    # for i, model_chunk in enumerate(model):
+    #     for name, param in model_chunk.named_parameters():
+    #         print(f"[rank{rank}, vdp rank {model_chunk.vp_stage}]: after optimizer, {name} = {param}")
     timers('optimizer').stop()
 
     # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
@@ -1340,7 +1386,8 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
         )
     return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad
 
-
+total_elapsed_time = 0.0
+total_throughput = 0.0
 def training_log(
     loss_dict,
     total_loss_dict,
@@ -1355,6 +1402,7 @@ def training_log(
     num_zeros_in_grad,
 ):
     """Log training information such as losses, timing, ...."""
+    global total_elapsed_time, total_throughput
     args = get_args()
     timers = get_timers()
     writer = get_tensorboard_writer()
@@ -1555,6 +1603,14 @@ def training_log(
                     writer.add_scalar('throughput', throughput, iteration)
                 if wandb_writer:
                     wandb_writer.log({'throughput': throughput}, iteration)
+        if iteration > 10:
+            total_elapsed_time += elapsed_time_per_iteration * 1000
+            aver_elapsed_time = total_elapsed_time / (iteration - 10)
+            total_throughput += throughput
+            aver_throughput = total_throughput / (iteration - 10)
+            log_string += f" average elapsed time(ms): {aver_elapsed_time:.2f} |"
+            log_string += f" average throughput per GPU (TFLOP/s/GPU): {aver_throughput:.1f} |"
+ 
         if args.log_energy:
             energy = (energy_monitor.lap() / total_iterations) / args.world_size
             power = energy / elapsed_time_per_iteration

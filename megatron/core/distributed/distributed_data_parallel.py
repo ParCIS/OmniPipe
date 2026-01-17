@@ -48,12 +48,14 @@ class DistributedDataParallel(_BaseDataParallel):
         disable_bucketing: bool = False,
         grad_comm_pgs: Optional[GradCommProcessGroups] = None,
         model_comm_pgs: Optional[ModelCommProcessGroups] = None,
+        vp_stage: Optional[int] = None,
     ):
         super().__init__(config=config, module=module)
         if has_config_logger_enabled(config):
             log_config_to_disk(config, locals(), prefix=type(self).__name__)
 
         self.module = module
+        self.vp_stage = vp_stage
 
         # If bucket_size is not provided as an input, use sane default.
         # If using very large dp_sizes, make buckets larger to ensure that chunks used in NCCL
@@ -183,7 +185,9 @@ class DistributedDataParallel(_BaseDataParallel):
             pp_rank = self.pp_group[0].rank()
         else:
             pp_rank = self.pp_group.rank()
-        if pp_rank > 0:
+        # Relative pp rank for multiple pipeline
+        relative_pp_rank = parallel_state.get_relative_pipeline_rank()
+        if (pp_rank > 0) and (relative_pp_rank is not None and relative_pp_rank > 0):
             self.bucket_size = None
         if disable_bucketing:
             self.bucket_size = None
@@ -292,6 +296,7 @@ class DistributedDataParallel(_BaseDataParallel):
                         gradient_scaling_factor,
                         param_and_grad_dtype_to_indices[(param_dtype, grad_dtype)],
                         self.ddp_config.nccl_ub,
+                        vp_stage=vp_stage
                     )
                 )
 
@@ -554,6 +559,9 @@ class DistributedDataParallel(_BaseDataParallel):
                 other settings.
             force_dispatch (bool, optional): force dispatch regardless of other settings.
         """
+        # rank = torch.distributed.get_rank()
+        # if rank == 0 or rank == 7:
+        #     print(f"[rank{rank}, vp stage {self.vp_stage}]: start to param sync.")
         if not force_sync:
             # If overlapping param AG with optimizer step, AG should not be dispatched again
             # in forward_backward_step.
@@ -592,6 +600,9 @@ class DistributedDataParallel(_BaseDataParallel):
         calls. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
         """
+        # rank = torch.distributed.get_rank()
+        # if rank == 0 or rank == 7:
+        #     print(f"[rank{rank}, vp stage {self.vp_stage}]: start to grad sync.")
         for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
             bucket_group.start_grad_sync()
 

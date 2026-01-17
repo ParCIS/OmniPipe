@@ -276,6 +276,7 @@ class GPTModel(LanguageModule):
         if decoder_input is not None:
             pass
         elif self.pre_process:
+            # print(f"[rank{torch.distributed.get_rank()}]: input_ids = {input_ids}")
             decoder_input = self.embedding(input_ids=input_ids, position_ids=position_ids)
         else:
             # intermediate stage of pipeline
@@ -557,8 +558,9 @@ class GPTModel(LanguageModule):
 
         if labels is None:
             # [s b h] => [b s h]
+            # print(f"[rank{torch.distributed.get_rank()}]: compute loss, logits = {logits}")
             return logits.transpose(0, 1).contiguous()
-
+        # print(f"[rank{torch.distributed.get_rank()}]: compute loss, logits = {logits}, labels = {labels}")
         loss = self.compute_language_model_loss(labels, logits)
 
         return loss
