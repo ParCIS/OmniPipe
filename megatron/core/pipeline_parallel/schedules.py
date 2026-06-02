@@ -121,14 +121,17 @@ def get_forward_backward_func():
         which have different shape handling.
 
     """
+    from megatron.training import get_args
+    args = get_args()
+    if args.enable_zero_bubble or args.enable_1f1b_v or args.enable_zb_runtime:
+        from megatron.core.pipeline_parallel.zerobubble import get_zero_bubble_forward_backward_func
+        return get_zero_bubble_forward_backward_func()
     pipeline_model_parallel_size = parallel_state.get_pipeline_model_parallel_world_size()
     if pipeline_model_parallel_size > 1:
         if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
             forward_backward_func = forward_backward_pipelining_with_interleaving
         elif parallel_state.get_virtual_data_parallel_world_size() is not None:
             # Chimera and dualpipe, import here to avoid circle import.
-            from megatron.training import get_args
-            args = get_args()
             multi_pipeline_type = args.multi_pipeline_type
             if multi_pipeline_type == "dualpipe":
                 from megatron.core.pipeline_parallel.dualpipe import get_dualpipe_forward_backward_func

@@ -48,14 +48,12 @@ class DistributedDataParallel(_BaseDataParallel):
         disable_bucketing: bool = False,
         grad_comm_pgs: Optional[GradCommProcessGroups] = None,
         model_comm_pgs: Optional[ModelCommProcessGroups] = None,
-        vp_stage: Optional[int] = None,
     ):
         super().__init__(config=config, module=module)
         if has_config_logger_enabled(config):
             log_config_to_disk(config, locals(), prefix=type(self).__name__)
 
         self.module = module
-        self.vp_stage = vp_stage
 
         # If bucket_size is not provided as an input, use sane default.
         # If using very large dp_sizes, make buckets larger to ensure that chunks used in NCCL
@@ -296,7 +294,6 @@ class DistributedDataParallel(_BaseDataParallel):
                         gradient_scaling_factor,
                         param_and_grad_dtype_to_indices[(param_dtype, grad_dtype)],
                         self.ddp_config.nccl_ub,
-                        vp_stage=vp_stage
                     )
                 )
 

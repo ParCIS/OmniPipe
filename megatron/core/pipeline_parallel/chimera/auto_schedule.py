@@ -332,7 +332,7 @@ if __name__ == "__main__":
     world_size = 8
     pipeline_model_parallel_world_size = 8
     virtual_data_parallel_size = 4
-    num_microbatches = 8
+    num_microbatches = 16
     for rank in range(world_size):
         print("=" * 150)
         ChimeraNode.forward_microbatch_count = {}

@@ -107,6 +107,7 @@ from .utils import (
     report_memory,
     unwrap_model,
     update_use_dist_ckpt,
+    is_pipeline_stage_containing_loss
 )
 from .global_vars import (
     destroy_global_vars,
@@ -937,16 +938,6 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     ):
         for model_module in model:
             model_module.cuda(torch.cuda.current_device())
-    if args.virtual_data_parallel_size is not None:
-        fill_value = [[0.0, 0.0007], [0.0001, 0.0006], [0.0002, 0.0005], [0.0003, 0.0004], [0.0004, 0.0003], [0.0005, 0.0002], [0.0006, 0.0001], [0.0007, 0.0]]
-    elif args.virtual_pipeline_model_parallel_size is not None:
-        fill_value = [[0.0, 0.0004], [0.0, 0.0004], [0.0001, 0.0005], [0.0001, 0.0005], [0.0002, 0.0006], [0.0002, 0.0006], [0.0003, 0.0007], [0.0003, 0.0007]]
-    rank = torch.distributed.get_rank()
-    # for i, model_chunk in enumerate(model):
-    #     for name, param in model_chunk.named_parameters():
-    #         # param.data.fill_(fill_value[rank][model_chunk.vp_stage])
-    #         # torch.nn.init.normal_(param, mean=fill_value[rank][model_chunk.vp_stage])
-    #         create_fixed_normal_inplace(param, fill_value[rank][model_chunk.vp_stage])
     # Fp16 conversion.
     if args.fp16 or args.bf16:
         config = get_model_config(model[0])
@@ -1014,7 +1005,6 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
                     config=config,
                     ddp_config=ddp_config,
                     module=model_chunk,
-                    vp_stage=model_chunk.vp_stage,
                     # Turn off bucketing for model_chunk 2 onwards, since communication for these
                     # model chunks is overlapped with compute anyway.
                     disable_bucketing=(model_chunk_idx > 0)
@@ -1027,6 +1017,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         if args.data_parallel_random_init:
             for model_module in model:                 
                 model_module.broadcast_params()
+    print(f"[rank{torch.distributed.get_rank()}]: {model}")
     return model
 
 
@@ -1329,7 +1320,7 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     if args.empty_unused_memory_level >= 2:
         torch.cuda.empty_cache()
 
-    if mpu.is_pipeline_last_stage(ignore_virtual=True):
+    if is_pipeline_stage_containing_loss(args):
         # Average loss across microbatches.
         loss_reduced = {}
 
@@ -1645,7 +1636,10 @@ def training_log(
         total_loss_dict[advanced_iters_key] = 0
         total_loss_dict[skipped_iters_key] = 0
         total_loss_dict[nan_iters_key] = 0
-        print_rank_last(log_string)
+        if args.zero_bubble_v_schedule or args.enable_1f1b_v:
+            print_rank_0(log_string)
+        else:
+            print_rank_last(log_string)
         report_memory_flag = iteration % 5 == 0
         if report_memory_flag:
             # Report memory after optimizer state has been initialized.
@@ -1656,6 +1650,9 @@ def training_log(
             report_memory_flag = False
         timers.log(timers_to_log, normalizer=args.log_interval)
 
+        # Removed to avoid global sync in zero bubble schedules.
+        if not (args.zero_bubble_v_schedule or args.enable_zero_bubble):
+            timers.log(timers_to_log, normalizer=args.log_interval)
     return report_memory_flag
 
 

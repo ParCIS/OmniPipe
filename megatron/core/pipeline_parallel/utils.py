@@ -84,7 +84,7 @@ def get_pp_first_rank(pp_group: torch.distributed.ProcessGroup):
         else:
             vdp_rank = vdp_rank - vdp_size // 2
             pp_first_rank = (pp_size - 1) - (vdp_rank * offset_unit)
-        return pp_first_rank
+        return pp_ranks[pp_first_rank]
 
 
 def get_pp_last_rank(pp_group: torch.distributed.ProcessGroup):
@@ -102,7 +102,7 @@ def get_pp_last_rank(pp_group: torch.distributed.ProcessGroup):
         else:
             vdp_rank = vdp_rank - vdp_size // 2
             pp_last_rank = vdp_rank * offset_unit
-        return pp_last_rank
+        return pp_ranks[pp_last_rank]
 
 def get_pp_next_rank(pp_group: torch.distributed.ProcessGroup):
     """Return the global rank of the next rank in the pipeline parallel group, or None if last

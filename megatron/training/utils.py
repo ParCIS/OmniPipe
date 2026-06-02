@@ -607,3 +607,10 @@ def get_batch_on_this_tp_rank(data_iterator):
 
 def update_use_dist_ckpt(args):
     args.use_dist_ckpt = args.ckpt_format != "torch"
+
+
+def is_pipeline_stage_containing_loss(args):
+    if args.zero_bubble_v_schedule or args.enable_1f1b_v:
+        return mpu.is_pipeline_first_stage(ignore_virtual=True)
+    else:
+        return mpu.is_pipeline_last_stage(ignore_virtual=True)

@@ -461,6 +461,9 @@ def default_embedding_ranks(pp_ranks):
     if len(pp_ranks) == 1:
         return [pp_ranks[0]]
     else:
+        from megatron.training.utils import get_args
+        if get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+            return [pp_ranks[0]]
         return [pp_ranks[0], pp_ranks[-1]]
 
 
@@ -1320,10 +1323,14 @@ def initialize_model_parallel(
         # Constructe local map of vdp rank to pp stage
         pp_rank = global_rank // num_devices_per_stage
         dual_pp_rank = pp -1 - pp_rank
-        if pp_rank < pp //2:
-            pp_ranks = [i for i in range(pp_rank, pp, offset_unit)] + [i for i in range(dual_pp_rank, -1, -offset_unit)]
-        else:
-            pp_ranks = [i for i in range(pp_rank, -1, -offset_unit)] + [i for i in range(dual_pp_rank, pp, offset_unit)]
+        # if pp_rank < pp //2:
+        #     pp_ranks = [i for i in range(pp_rank, pp, offset_unit)] + [i for i in range(dual_pp_rank, -1, -offset_unit)]
+        # else:
+        #     pp_ranks = [i for i in range(pp_rank, -1, -offset_unit)] + [i for i in range(dual_pp_rank, pp, offset_unit)]
+        # _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = pp_ranks
+        def circle_range(start, offset, total, size):
+                return [(start + i * offset) % size for i in range(total)]
+        pp_ranks = circle_range(pp_rank, offset_unit, vdp // 2, pp) + circle_range(dual_pp_rank, -offset_unit, vdp // 2, pp)
         _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = pp_ranks
         is_dual_rank = False if ((pp_rank % offset_unit) < (offset_unit // 2)) else True
         is_dual_rank = is_dual_rank
@@ -1333,10 +1340,10 @@ def initialize_model_parallel(
             _RELATIVE_PIPELINE_RANK = pp_rank % offset_unit
         print(f">>> [rank{global_rank}]: Chimera local virtual data parallel rank to pipeline rank map = {pp_ranks}, relative rank = {_RELATIVE_PIPELINE_RANK}")
         
-        for pp_rank in range(pp // vdp):
-            dual_pp_rank = pp - 1 - pp_rank
-            pp_ranks = [i for i in range(pp_rank, pp, offset_unit)] + [i for i in range(dual_pp_rank, -1, -offset_unit)]
-            if global_rank in pp_ranks:
+        for relative_pp_rank in range(pp // vdp):
+            dual_pp_rank = pp - 1 - relative_pp_rank
+            pp_ranks = [i for i in range(relative_pp_rank, pp, offset_unit)] + [i for i in range(dual_pp_rank, -1, -offset_unit)]
+            if pp_rank in pp_ranks:
                 _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = pp_ranks
                 print(f">>> [rank{global_rank}]: Chimera global virtual data parallel rank to pipeline rank map = {pp_ranks}")
 
@@ -1669,8 +1676,12 @@ def is_pipeline_last_stage(ignore_virtual=True, vp_stage=None):
     """Return True if in the last pipeline-model-parallel stage, False otherwise."""
     if not ignore_virtual and get_virtual_pipeline_model_parallel_world_size() is not None:
         assert vp_stage is not None, "vp_stage must be passed if virtual pipeline is enabled"
-
-        if get_virtual_pipeline_model_parallel_world_size() is not None:
+        virtual_pipeline_model_parallel_world_size = get_virtual_pipeline_model_parallel_world_size()
+        from megatron.training.utils import get_args
+        if get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+            assert virtual_pipeline_model_parallel_world_size == 2
+            return get_pipeline_model_parallel_rank() == 0 and vp_stage == 1
+        if  virtual_pipeline_model_parallel_world_size is not None:
             if vp_stage != (get_virtual_pipeline_model_parallel_world_size() - 1):
                 return False
     if get_virtual_data_parallel_world_size() is not None:
@@ -1696,6 +1707,9 @@ def is_rank_in_embedding_group(ignore_virtual=True, vp_stage=None):
         return False
     if ignore_virtual:
         return rank in _EMBEDDING_GLOBAL_RANKS
+    from megatron.training import get_args
+    if get_args().zero_bubble_v_schedule or get_args().enable_1f1b_v:
+        return is_pipeline_first_stage(ignore_virtual=False) or is_pipeline_last_stage(ignore_virtual=False)
     if rank in _EMBEDDING_GLOBAL_RANKS:
         if rank == _EMBEDDING_GLOBAL_RANKS[0]:
             return is_pipeline_first_stage(ignore_virtual=False, vp_stage=vp_stage)
@@ -2193,6 +2207,19 @@ def get_global_dp_rank_in_vdp_group(vdp_rank: int):
     global_rank = _DATA_PARALLEL_GLOBAL_RANKS[ori_dp_size * vdp_rank + cur_rank_idx]
     return _DATA_PARALLEL_GLOBAL_RANKS_SORTED.index(global_rank)
     
+
+_SEQ_SPLIT_IDX = 0
+
+def get_seq_split_idx():
+    """Get the sequence split index"""
+    global _SEQ_SPLIT_IDX
+    return _SEQ_SPLIT_IDX
+
+def set_seq_split_idx(idx):
+    """Set the sequence split index"""
+    global _SEQ_SPLIT_IDX
+    _SEQ_SPLIT_IDX = idx
+
 
 def destroy_model_parallel():
     """Set the groups to none."""
