@@ -2,10 +2,13 @@
 
 """Model and data parallel groups."""
 
+import json
 import os
 import warnings
 from datetime import timedelta
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
+import logging
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import torch
@@ -140,6 +143,7 @@ _RELATIVE_PIPELINE_RANK = None
 _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = None
 _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = None
 _DATA_PARALLEL_GLOBAL_RANKS_SORTED = None
+_VIRTUAL_PHYSICAL_DEVICE_MAPPING = None
 
 def get_nccl_options(pg_name, nccl_comm_cfgs):
     """Set the NCCL process group options.
@@ -421,6 +425,87 @@ class RankGenerator(object):
         for token in order.split("-"):
             self.ordered_size.append(self.name_to_size[token])
 
+        # 从环境变量加载映射文件
+        self.virt2phys = None
+        self._load_mapping_from_env()
+    
+    def _load_mapping_from_env(self, env_key: str = "VIRT_PHYS_MAPPING_JSON") -> None:
+        """
+        从环境变量指定JSON文件加载虚拟rank→物理GPU映射
+        任意异常/校验失败均打印明确日志并回退原生逻辑
+        """
+        file_path = os.getenv(env_key, "").strip()
+
+        # 场景1：环境变量未配置，直接退出无日志
+        if not file_path:
+            return
+
+        logger.info(f"[RankGenerator] 检测到映射环境变量 {env_key}, 目标映射文件路径: {file_path}, 当前world_size={self.world_size}")
+
+        # 场景2：文件读取异常（不存在/权限/IO错误）
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+        except FileNotFoundError:
+            logger.warning(f"[RankGenerator] 映射文件不存在: {file_path}，关闭虚拟rank映射，使用原生rank")
+            return
+        except PermissionError:
+            logger.warning(f"[RankGenerator] 无权限读取映射文件: {file_path}，关闭虚拟rank映射，使用原生rank")
+            return
+        except json.JSONDecodeError as e:
+            logger.error(f"[RankGenerator] 映射文件JSON格式非法，文件路径: {file_path}", exc_info=True)
+            return
+        except Exception:
+            logger.error(f"[RankGenerator] 读取映射文件发生未知异常，路径: {file_path}", exc_info=True)
+            return
+
+        # 场景3：键值无法转为整数
+        mapping = {}
+        try:
+            for str_virt, phys in raw_data.items():
+                virt_rank = int(str_virt)
+                phys_rank = int(phys)
+                mapping[virt_rank] = phys_rank
+        except (ValueError, TypeError) as e:
+            logger.warning(
+                f"[RankGenerator] 映射表存在非法键值，必须为数字格式，原始解析内容前10项: {list(raw_data.items())[:10]}, 错误详情: {str(e)}"
+            )
+            return
+
+        # 场景4：映射条目数量与总进程数不匹配
+        if len(mapping) != self.world_size:
+            logger.warning(
+                f"[RankGenerator] 映射条目数量校验失败：JSON共{len(mapping)}条映射，要求必须等于world_size={self.world_size}，关闭映射"
+            )
+            return
+
+        # 场景5：虚拟rank没有全覆盖0~world_size-1
+        expected_virt_set = set(range(self.world_size))
+        actual_virt_set = set(mapping.keys())
+        if actual_virt_set != expected_virt_set:
+            missing = sorted(expected_virt_set - actual_virt_set)
+            extra = sorted(actual_virt_set - expected_virt_set)
+            logger.warning(
+                f"[RankGenerator] 虚拟rank覆盖不全，缺失rank列表: {missing}, 多余非法rank列表: {extra}，关闭映射"
+            )
+            return
+
+        # 全部校验通过，启用映射并打印摘要
+        global _VIRTUAL_PHYSICAL_DEVICE_MAPPING
+        if _VIRTUAL_PHYSICAL_DEVICE_MAPPING is None:
+            _VIRTUAL_PHYSICAL_DEVICE_MAPPING = mapping
+        self.virt2phys = mapping
+        logger.info(
+            f"[RankGenerator] ✅ 虚拟rank→物理GPU映射加载成功，总映射数{self.world_size}，映射表预览(前10条): {dict(list(mapping.items())[:10])}"
+        )
+
+
+    def _map_single_rank(self, virt_rank: int) -> int:
+        """单个虚拟rank转为物理rank，无映射则原值返回"""
+        if self.virt2phys is None:
+            return virt_rank
+        return self.virt2phys[virt_rank]
+
     def get_mask(self, order: str, token: str):
         """Create a mask for the specified tokens based on the given order.
 
@@ -452,7 +537,15 @@ class RankGenerator(object):
             for rank_group in ranks:
                 for i in range(len(rank_group)):
                     rank_group[i] += self.rank_offset
-        return ranks
+        # 执行虚拟rank映射
+        if self.virt2phys is None:
+            return ranks
+        # 应用虚拟->物理映射
+        result = []
+        for group in ranks:
+            mapped_group = [self._map_single_rank(v) for v in group]
+            result.append(mapped_group)
+        return result
 
 
 def default_embedding_ranks(pp_ranks):
@@ -1018,6 +1111,10 @@ def initialize_model_parallel(
             if _PIPELINE_MODEL_PARALLEL_GROUP is None:
                 _PIPELINE_MODEL_PARALLEL_GROUP = group
                 _PIPELINE_GLOBAL_RANKS = ranks
+                pp_rank = ranks.index(rank)
+                print(f"pp_ranks = {ranks}")
+                set_pipeline_model_parallel_rank(pp_rank)
+                print(f"[rank{rank}]: set pipeline_model_parallel_rank to {pp_rank}")
             elif isinstance(_PIPELINE_GLOBAL_RANKS[0], list):
                 _PIPELINE_MODEL_PARALLEL_GROUP.append(group)
                 _PIPELINE_GLOBAL_RANKS.append(ranks)
@@ -1276,6 +1373,7 @@ def initialize_model_parallel(
         global _VIRTUAL_DATA_PARALLEL_SIZE
         global _RELATIVE_PIPELINE_RANK
         global _DATA_PARALLEL_GLOBAL_RANKS_SORTED
+        global _INTRA_PARTIAL_EXPERT_DATA_PARALLEL_GROUP
         pp = pipeline_model_parallel_size
         tp = tensor_model_parallel_size
         etp = expert_tensor_parallel_size
@@ -1315,13 +1413,15 @@ def initialize_model_parallel(
 
         offset_unit = pp // vdp * 2
         device_count = torch.cuda.device_count()
-        if ep > device_count or world_size <= device_count:
-            extend_vdp_to_ep = True
-        else:
-            extend_vdp_to_ep = False
+        # if ep > device_count or world_size <= device_count:
+        #     extend_vdp_to_ep = True
+        # else:
+        #     extend_vdp_to_ep = False
+        # NOTE: for ablation study.
+        extend_vdp_to_ep = os.environ.get("EXTEND_VDP_TO_EP", "false").lower() == "true"
         
         # Constructe local map of vdp rank to pp stage
-        pp_rank = global_rank // num_devices_per_stage
+        pp_rank = get_pipeline_model_parallel_rank()
         dual_pp_rank = pp -1 - pp_rank
         # if pp_rank < pp //2:
         #     pp_ranks = [i for i in range(pp_rank, pp, offset_unit)] + [i for i in range(dual_pp_rank, -1, -offset_unit)]
@@ -1395,6 +1495,7 @@ def initialize_model_parallel(
                     new_ep_dp_group = create_group(new_ep_dp_ranks, timeout=timeout, pg_options=get_nccl_options("ep-dp", nccl_comm_cfgs))
                     if global_rank in new_ep_dp_ranks:
                         _EXPERT_DATA_PARALLEL_GROUP = new_ep_dp_group
+                        _INTRA_PARTIAL_EXPERT_DATA_PARALLEL_GROUP = new_ep_dp_group
             
         # construct embedding groups
         for vdp_rank in range(vdp // 2):

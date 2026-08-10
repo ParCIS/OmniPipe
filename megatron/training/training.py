@@ -107,7 +107,8 @@ from .utils import (
     report_memory,
     unwrap_model,
     update_use_dist_ckpt,
-    is_pipeline_stage_containing_loss
+    is_pipeline_stage_containing_loss,
+    is_rank0
 )
 from .global_vars import (
     destroy_global_vars,
@@ -1547,7 +1548,8 @@ def training_log(
             mtp_loss_scale, iteration, writer, wandb_writer, total_loss_dict
         )
     if iteration % args.log_interval == 0:
-        if args.record_memory_history and is_last_rank():
+        if args.record_memory_history and is_rank0() and iteration == 2:
+            print(f"[rank{torch.distributed.get_rank()}]: dump memory_snapshot")
             snapshot = torch.cuda.memory._snapshot()
             from pickle import dump
 

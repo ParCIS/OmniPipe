@@ -2,6 +2,7 @@ import torch
 from megatron.core import parallel_state
 import torch.distributed as dist
 from .scheduler import ChimeraScheduler
+import os
 
 
 def update_global_config_for_chimera(args):
@@ -10,10 +11,12 @@ def update_global_config_for_chimera(args):
     args.delay_wgrad_compute = True
     world_size = dist.get_world_size()
     device_count = torch.cuda.device_count()
-    if ep > device_count or world_size <= device_count:
-        extend_vdp_to_ep = True
-    else:
-        extend_vdp_to_ep = False
+    # if ep > device_count or world_size <= device_count:
+    #     extend_vdp_to_ep = True
+    # else:
+    #     extend_vdp_to_ep = False
+    # NOTE: for ablation study
+    extend_vdp_to_ep = os.environ.get("EXTEND_VDP_TO_EP", "false").lower() == "true"
     if args.num_experts is not None and extend_vdp_to_ep:
         args.expert_model_parallel_size = ep * vdp
     from megatron.core.models.common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan

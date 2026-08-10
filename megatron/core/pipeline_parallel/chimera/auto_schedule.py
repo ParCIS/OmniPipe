@@ -1,6 +1,10 @@
 from typing import Callable, Iterator, Optional, Union, List, Dict
 from dataclasses import dataclass
 from enum import Enum
+try:
+    from megatron.core import parallel_state
+except ImportError:
+    parallel_state = None
 
 
 class ChimeraNodeType(Enum):
@@ -94,7 +98,10 @@ class ChimeraAutoSchedule:
         self.num_microbatches: int = num_microbatches
 
         # chimera node config
-        pipeline_rank = rank // (world_size // pipeline_model_parallel_world_size)
+        if parallel_state is None:
+            pipeline_rank = rank // (world_size // pipeline_model_parallel_world_size)
+        else:
+            pipeline_rank = parallel_state.get_pipeline_model_parallel_rank()
         ChimeraNode.virtual_data_parallel_size = virtual_data_parallel_size
         ChimeraNode.pipeline_model_parallel_world_size = pipeline_model_parallel_world_size
         ChimeraNode.pipeline_rank = pipeline_rank
@@ -332,7 +339,7 @@ if __name__ == "__main__":
     world_size = 8
     pipeline_model_parallel_world_size = 8
     virtual_data_parallel_size = 4
-    num_microbatches = 16
+    num_microbatches = 12
     for rank in range(world_size):
         print("=" * 150)
         ChimeraNode.forward_microbatch_count = {}
