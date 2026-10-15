@@ -223,13 +223,13 @@ If you use OmniPipe in your research, please cite:
 
 ```bibtex
 @inproceedings{li2026omnipipe,
-  author    = {Jun Li and Zhi Ma and Shigang Li},
+  author    = {Li, Jun and Ma, Zhi and Li, Shigang},
   title     = {{OmniPipe}: Efficient, Flexible and Scalable Pipeline Parallelism for Large Model Training},
   booktitle = {Proceedings of the 55th International Conference on Parallel Processing},
   year      = {2026},
-  doi       = {10.1145/3832810.3832820},
+  pages     = {1081--1091},
   publisher = {Association for Computing Machinery},
-  location  = {Singapore, Singapore}
+  doi       = {10.1145/3832810.3832820}
 }
 ```
 
