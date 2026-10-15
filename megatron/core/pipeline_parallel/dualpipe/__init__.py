@@ -1,4 +1,4 @@
-from ..chimera import init_chimera_parallel_state as init_dualpipe_parallel_state
+from ..omnipipe import init_omnipipe_parallel_state as init_dualpipe_parallel_state
 from .dualpipe_scheduler import DualPipeScheduler
 
 DUALPIPE_SCHEDULER = None

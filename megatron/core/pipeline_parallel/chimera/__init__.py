@@ -1,11 +1,11 @@
 import torch
 from megatron.core import parallel_state
 import torch.distributed as dist
-from .scheduler import ChimeraScheduler
+from .scheduler import OmnipipeScheduler
 import os
 
 
-def update_global_config_for_chimera(args):
+def update_global_config_for_omnipipe(args):
     ep = args.expert_model_parallel_size
     vdp = args.virtual_data_parallel_size
     args.delay_wgrad_compute = True
@@ -28,7 +28,7 @@ def update_global_config_for_chimera(args):
 
 def transformer_layer_schedule_plan_run_patch(f_layer, b_layer, f_input=None, b_grad=None):
     """
-    Chimera is unlike to interleaved 1f1b. We delay the all backward_dw to get less bubble.
+    Omnipipe is unlike to interleaved 1f1b. We delay the all backward_dw to get less bubble.
     """
     if b_layer is not None:
             b_grad = b_layer.mtp_post_process.backward(b_grad)
@@ -133,15 +133,15 @@ def transformer_model_chunk_schedule_plan_run_patch(f_schedule_plan, b_schedule_
 
     return f_input
 
-CHIMERA_SCHEDULER = None
-def get_chimera_forward_backward_func():
-    global CHIMERA_SCHEDULER
-    if CHIMERA_SCHEDULER is None:
-        CHIMERA_SCHEDULER = ChimeraScheduler()
-    return CHIMERA_SCHEDULER
+OMNIPIPE_SCHEDULER = None
+def get_omnipipe_forward_backward_func():
+    global OMNIPIPE_SCHEDULER
+    if OMNIPIPE_SCHEDULER is None:
+        OMNIPIPE_SCHEDULER = OmnipipeScheduler()
+    return OMNIPIPE_SCHEDULER
 
 
-__all__ = ["update_global_config_for_chimera", "get_chimera_forward_backward_func"]
+__all__ = ["update_global_config_for_omnipipe", "get_omnipipe_forward_backward_func"]
 
 # pretrain_gpt.py 头部添加
 import os

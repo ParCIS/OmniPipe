@@ -130,16 +130,16 @@ _INTRA_DISTRIBUTED_OPTIMIZER_INSTANCE_GROUP = None
 # Memory buffers to avoid dynamic memory allocation
 _GLOBAL_MEMORY_BUFFER = None
 
-# chimera virtual data parallel size
+# omnipipe virtual data parallel size
 _VIRTUAL_DATA_PARALLEL_SIZE = None
 
-# chimera virtual data parallel rank
+# omnipipe virtual data parallel rank
 _VIRTUAL_DATA_PARALLEL_RANK = None
 
-# chimera relative pp rank
+# omnipipe relative pp rank
 _RELATIVE_PIPELINE_RANK = None
 
-# chimera map virtual data parallel rank to pipeline rank
+# omnipipe map virtual data parallel rank to pipeline rank
 _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = None
 _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = None
 _DATA_PARALLEL_GLOBAL_RANKS_SORTED = None
@@ -1352,10 +1352,10 @@ def initialize_model_parallel(
     # we could stick it there
     _set_global_memory_buffer()
 
-    # Init chimera parallel_state
-    def init_chimera_parallel_state():
+    # Init omnipipe parallel_state
+    def init_omnipipe_parallel_state():
         """
-        Initialize Chimera parallel groups.
+        Initialize Omnipipe parallel groups.
         Note that some communication of M-core doesn't use yet, so we don't patch them here
         """
         global _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP
@@ -1438,14 +1438,14 @@ def initialize_model_parallel(
             _RELATIVE_PIPELINE_RANK = (offset_unit - 1 - pp_rank % offset_unit)
         else:
             _RELATIVE_PIPELINE_RANK = pp_rank % offset_unit
-        print(f">>> [rank{global_rank}]: Chimera local virtual data parallel rank to pipeline rank map = {pp_ranks}, relative rank = {_RELATIVE_PIPELINE_RANK}")
+        print(f">>> [rank{global_rank}]: Omnipipe local virtual data parallel rank to pipeline rank map = {pp_ranks}, relative rank = {_RELATIVE_PIPELINE_RANK}")
         
         for relative_pp_rank in range(pp // vdp):
             dual_pp_rank = pp - 1 - relative_pp_rank
             pp_ranks = [i for i in range(relative_pp_rank, pp, offset_unit)] + [i for i in range(dual_pp_rank, -1, -offset_unit)]
             if pp_rank in pp_ranks:
                 _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP = pp_ranks
-                print(f">>> [rank{global_rank}]: Chimera global virtual data parallel rank to pipeline rank map = {pp_ranks}")
+                print(f">>> [rank{global_rank}]: Omnipipe global virtual data parallel rank to pipeline rank map = {pp_ranks}")
 
             # constructe new dp groups
             for i in range(num_dp_group_per_stage):
@@ -1513,7 +1513,7 @@ def initialize_model_parallel(
         if global_rank == 0 and extend_vdp_to_ep:
             print(f">>> Set expert model parallel size to {ep * vdp}")
     if virtual_data_parallel_size is not None:
-        init_chimera_parallel_state()
+        init_omnipipe_parallel_state()
 
 def is_initialized():
     """Useful for code segments that may be accessed with or without mpu initialization"""
@@ -2209,7 +2209,7 @@ def get_all_ranks():
     ]
     return "_".join(map(lambda x: str(x or 0), ranks))
 
-# chimera 
+# omnipipe 
 def get_virtual_data_parallel_world_size() -> int:
     """Return the virtual data-parallel world size."""
     global _VIRTUAL_DATA_PARALLEL_SIZE
@@ -2256,7 +2256,7 @@ def virtual_data_parallel_rank_to_pipeline_stage(vdp_rank: int = None):
         vdp_rank = get_virtual_data_parallel_rank()
     return _LOCAL_VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP[vdp_rank]
 
-# Chimera pipeline
+# Omnipipe pipeline
 def pipeline_stage_to_virtual_data_parallel_rank(pp_rank: int = None):
     """
     When enable virtual data parallel, a map will be initialized to record the pipeline stage to its virtual data parallel rank in every rank respectively.
@@ -2288,7 +2288,7 @@ def get_pp_ranks_of_vdp_replicas() -> List[int]:
     assert _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP is not None, "Virtual data pipeline is not initialized."
     return _VIRTUAL_DATA_PARALLEL_RANK_TO_PIPELINE_MODEL_PARALLEL_RANK_MAP
 
-# Chimera pipeline's pipeline rank
+# Omnipipe pipeline's pipeline rank
 def get_relative_pipeline_rank() -> int:
     global _RELATIVE_PIPELINE_RANK
     return _RELATIVE_PIPELINE_RANK

@@ -12,11 +12,11 @@ from megatron.core.tensor_parallel.weight_grad_store import WeightGradStore
 import torch.distributed as dist
 import logging
 logger = logging.getLogger(__name__)
-from .auto_schedule import ChimeraAutoSchedule, ChimeraNode
+from .auto_schedule import OmnipipeAutoSchedule, OmnipipeNode
 from .communication import CommunicationManager
 
 
-class ChimeraScheduler():
+class OmnipipeScheduler():
     def __init__(self):
         self.first_run = True
     def prepare(
@@ -34,7 +34,7 @@ class ChimeraScheduler():
         first_val_step: Optional[bool] = None,
         adjust_tensor_shapes_fn: Optional[Callable] = None,  # unused
     ):
-        """Run chimera schedule (multiple pipeline per GPU).
+        """Run omnipipe schedule (multiple pipeline per GPU).
         Returns dictionary with losses if the last stage, empty dict otherwise.
         """
         # Megatron config
@@ -55,7 +55,7 @@ class ChimeraScheduler():
         self.rank = dist.get_rank()
         self.world_size = dist.get_world_size()
         self.virtual_data_parallel_world_size = parallel_state.get_virtual_data_parallel_world_size()
-        self.schedule = ChimeraAutoSchedule(self.rank, self.world_size, parallel_state.get_pipeline_model_parallel_world_size(), parallel_state.get_virtual_data_parallel_world_size(), num_microbatches).get_schedule()
+        self.schedule = OmnipipeAutoSchedule(self.rank, self.world_size, parallel_state.get_pipeline_model_parallel_world_size(), parallel_state.get_virtual_data_parallel_world_size(), num_microbatches).get_schedule()
         self.reorder_models(model)
         self.param_sync_model_chunk_id_queue: List[int] = None
         pp_world_size = parallel_state.get_pipeline_model_parallel_world_size()
@@ -66,7 +66,7 @@ class ChimeraScheduler():
             self.config.overlap_moe_expert_parallel_comm = False
             logger.warning(f"Overlap_moe_expert_parallel_comm is not supported under the number of microbatches {num_microbatches}, set it to False")
         if self.rank == 0:
-            logger.info(f">>>ChimeraScheduler finishes initialization.")
+            logger.info(f">>>OmnipipeScheduler finishes initialization.")
 
         # Megatron config postprocess
         if self.config.overlap_p2p_comm and self.config.batch_p2p_comm:
@@ -101,7 +101,7 @@ class ChimeraScheduler():
         self.no_sync_context = None
 
         self.model_type = get_model_type(model[0])
-        # Chimera config
+        # Omnipipe config
         self.comm_mgr = CommunicationManager(
             num_microbatches=self.num_microbatches,
             tensor_shape=self.tensor_shape,
@@ -260,7 +260,7 @@ class ChimeraScheduler():
         """Postprocess for backward_step_helper"""
         self.input_tensor_grads[vdp_rank].append(intput_tensor_grad)
     
-    def _combined_1f1b_schedule_for_chimera(self, f_vdp_rank: Optional[int] = None, b_vdp_rank: Optional[int] = None) -> None:
+    def _combined_1f1b_schedule_for_omnipipe(self, f_vdp_rank: Optional[int] = None, b_vdp_rank: Optional[int] = None) -> None:
         # import here to avoid circle import
         from megatron.core.pipeline_parallel.schedules import check_first_val_step
         from megatron.core.pipeline_parallel.utils import set_streams
@@ -355,7 +355,7 @@ class ChimeraScheduler():
         self.comm_mgr.commit()
         torch.cuda.nvtx.range_push(f"model_{vdp_rank}_mbc_{self.current_f_microbatch_id[vdp_rank] + vdp_rank * 10}_f")
         if self.config.overlap_moe_expert_parallel_comm:
-            self._combined_1f1b_schedule_for_chimera(f_vdp_rank=vdp_rank)
+            self._combined_1f1b_schedule_for_omnipipe(f_vdp_rank=vdp_rank)
         else:
             self._forward_step_helper(vdp_rank)
         torch.cuda.nvtx.range_pop()
@@ -369,7 +369,7 @@ class ChimeraScheduler():
         self.comm_mgr.commit()
         torch.cuda.nvtx.range_push(f"model_{vdp_rank}_mbc_{self.current_b_microbatch_id[vdp_rank] + vdp_rank * 10}_b")
         if self.config.overlap_moe_expert_parallel_comm:
-            self._combined_1f1b_schedule_for_chimera(b_vdp_rank=vdp_rank)
+            self._combined_1f1b_schedule_for_omnipipe(b_vdp_rank=vdp_rank)
         else:
             self._backward_step_helper(vdp_rank)
         torch.cuda.nvtx.range_pop()
@@ -388,7 +388,7 @@ class ChimeraScheduler():
         self.comm_mgr.commit()
         torch.cuda.nvtx.range_push(f"model_{f_vdp_rank}_mbc_{self.current_f_microbatch_id[f_vdp_rank] + f_vdp_rank * 10}_f_model_{b_vdp_rank}_mbc_{self.current_b_microbatch_id[b_vdp_rank] + b_vdp_rank * 10}_b")
         if self.config.overlap_moe_expert_parallel_comm and not self.forward_only:
-            self._combined_1f1b_schedule_for_chimera(f_vdp_rank, b_vdp_rank)
+            self._combined_1f1b_schedule_for_omnipipe(f_vdp_rank, b_vdp_rank)
         else:
             self._forward_step_helper(f_vdp_rank)
             self._backward_step_helper(b_vdp_rank)
@@ -503,7 +503,7 @@ class ChimeraScheduler():
         reader can refence to the dualpipe
         """
         self.disable_grad_sync()
-        is_middle_rank = ChimeraNode.is_middle_rank
+        is_middle_rank = OmnipipeNode.is_middle_rank
         # Synchronize params for first model chunks
         if self.config.param_sync_func is not None:
             param_sync_model_chunk_id = self.param_sync_model_chunk_id_queue[0]

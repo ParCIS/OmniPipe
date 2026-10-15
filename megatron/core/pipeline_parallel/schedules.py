@@ -131,14 +131,14 @@ def get_forward_backward_func():
         if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
             forward_backward_func = forward_backward_pipelining_with_interleaving
         elif parallel_state.get_virtual_data_parallel_world_size() is not None:
-            # Chimera and dualpipe, import here to avoid circle import.
+            # Omnipipe and dualpipe, import here to avoid circle import.
             multi_pipeline_type = args.multi_pipeline_type
             if multi_pipeline_type == "dualpipe":
                 from megatron.core.pipeline_parallel.dualpipe import get_dualpipe_forward_backward_func
                 forward_backward_func = get_dualpipe_forward_backward_func()
             else:
-                from megatron.core.pipeline_parallel.chimera import get_chimera_forward_backward_func
-                forward_backward_func = get_chimera_forward_backward_func()
+                from megatron.core.pipeline_parallel.omnipipe import get_omnipipe_forward_backward_func
+                forward_backward_func = get_omnipipe_forward_backward_func()
         else:
             forward_backward_func = forward_backward_pipelining_without_interleaving
     else:

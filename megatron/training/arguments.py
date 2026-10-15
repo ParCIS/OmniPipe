@@ -2327,8 +2327,8 @@ def _add_distributed_args(parser):
                        help='Degree of multiple pipeline.')
     group.add_argument('--extend-vdp-to-ep', action="store_true", default=False,
                        help="extend multipipe to expert parallel to reduce memory usage")
-    group.add_argument('--multi-pipeline-type', type=str, default="chimera", choices=['chimera', 'dualpipe'],
-                       help="Multi-pipeline type, choice in [chimera, dualpipe]")
+    group.add_argument('--multi-pipeline-type', type=str, default="omnipipe", choices=['omnipipe', 'dualpipe'],
+                       help="Multi-pipeline type, choice in [omnipipe, dualpipe]")
     group.add_argument('--decoder-first-pipeline-num-layers',
                        type=int, default=None,
                        help=('The number of transformer layers on the first pipeline stage of the decoder. '

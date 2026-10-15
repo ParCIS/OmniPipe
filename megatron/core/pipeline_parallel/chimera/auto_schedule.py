@@ -7,13 +7,13 @@ except ImportError:
     parallel_state = None
 
 
-class ChimeraNodeType(Enum):
+class OmnipipeNodeType(Enum):
     IDLE = 0
     BACKWARD = 1
     FORWARD = 2
 
 
-class ChimeraNode:
+class OmnipipeNode:
 
     forward_microbatch_count: Dict[int, int] = {}
     backward_microbatch_count: Dict[int, int] = {}
@@ -23,44 +23,44 @@ class ChimeraNode:
     is_dual_rank: bool = False
     is_middle_rank: bool = False
 
-    def __init__(self, type: ChimeraNodeType,  virtual_data_parallel_rank: int = 0):
+    def __init__(self, type: OmnipipeNodeType,  virtual_data_parallel_rank: int = 0):
         self.type = type
         
         # calculate the virtual data parallel rank mapping of each pipeline rank
-        self_vdp_rank = ChimeraNode.pipeline_rank // (ChimeraNode.pipeline_model_parallel_world_size // (ChimeraNode.virtual_data_parallel_size // 2))
+        self_vdp_rank = OmnipipeNode.pipeline_rank // (OmnipipeNode.pipeline_model_parallel_world_size // (OmnipipeNode.virtual_data_parallel_size // 2))
 
         base = 0
-        dual_base = ChimeraNode.virtual_data_parallel_size // 2
-        if ChimeraNode.is_dual_rank:
-            self_vdp_rank = ChimeraNode.virtual_data_parallel_size - 1 - self_vdp_rank
-            base = ChimeraNode.virtual_data_parallel_size // 2
+        dual_base = OmnipipeNode.virtual_data_parallel_size // 2
+        if OmnipipeNode.is_dual_rank:
+            self_vdp_rank = OmnipipeNode.virtual_data_parallel_size - 1 - self_vdp_rank
+            base = OmnipipeNode.virtual_data_parallel_size // 2
             dual_base = 0
-        if virtual_data_parallel_rank < ChimeraNode.virtual_data_parallel_size // 2:
-            virtual_data_parallel_rank = (self_vdp_rank + virtual_data_parallel_rank) % (ChimeraNode.virtual_data_parallel_size // 2) + base
+        if virtual_data_parallel_rank < OmnipipeNode.virtual_data_parallel_size // 2:
+            virtual_data_parallel_rank = (self_vdp_rank + virtual_data_parallel_rank) % (OmnipipeNode.virtual_data_parallel_size // 2) + base
         else:
             if self_vdp_rank == 0:
-                self_dual_vdp_rank = ChimeraNode.virtual_data_parallel_size // 2
-            elif self_vdp_rank == ChimeraNode.virtual_data_parallel_size // 2:
+                self_dual_vdp_rank = OmnipipeNode.virtual_data_parallel_size // 2
+            elif self_vdp_rank == OmnipipeNode.virtual_data_parallel_size // 2:
                 self_dual_vdp_rank = 0
             else:
-                self_dual_vdp_rank = ChimeraNode.virtual_data_parallel_size - self_vdp_rank
-            virtual_data_parallel_rank = (self_dual_vdp_rank + virtual_data_parallel_rank) % (ChimeraNode.virtual_data_parallel_size // 2) + dual_base
+                self_dual_vdp_rank = OmnipipeNode.virtual_data_parallel_size - self_vdp_rank
+            virtual_data_parallel_rank = (self_dual_vdp_rank + virtual_data_parallel_rank) % (OmnipipeNode.virtual_data_parallel_size // 2) + dual_base
         
         self.virtual_data_parallel_rank = virtual_data_parallel_rank
         
         # calculate microbatch index of each virtual data parallel rank
-        if self.type == ChimeraNodeType.FORWARD:
-            if virtual_data_parallel_rank not in ChimeraNode.forward_microbatch_count:
-                ChimeraNode.forward_microbatch_count[virtual_data_parallel_rank] = 0
+        if self.type == OmnipipeNodeType.FORWARD:
+            if virtual_data_parallel_rank not in OmnipipeNode.forward_microbatch_count:
+                OmnipipeNode.forward_microbatch_count[virtual_data_parallel_rank] = 0
 
-            self.microbatch = ChimeraNode.forward_microbatch_count[virtual_data_parallel_rank]
-            ChimeraNode.forward_microbatch_count[virtual_data_parallel_rank] += 1
-        elif self.type == ChimeraNodeType.BACKWARD:
-            if virtual_data_parallel_rank not in ChimeraNode.backward_microbatch_count:
-                ChimeraNode.backward_microbatch_count[virtual_data_parallel_rank] = 0
+            self.microbatch = OmnipipeNode.forward_microbatch_count[virtual_data_parallel_rank]
+            OmnipipeNode.forward_microbatch_count[virtual_data_parallel_rank] += 1
+        elif self.type == OmnipipeNodeType.BACKWARD:
+            if virtual_data_parallel_rank not in OmnipipeNode.backward_microbatch_count:
+                OmnipipeNode.backward_microbatch_count[virtual_data_parallel_rank] = 0
 
-            self.microbatch = ChimeraNode.backward_microbatch_count[virtual_data_parallel_rank]
-            ChimeraNode.backward_microbatch_count[virtual_data_parallel_rank] += 1
+            self.microbatch = OmnipipeNode.backward_microbatch_count[virtual_data_parallel_rank]
+            OmnipipeNode.backward_microbatch_count[virtual_data_parallel_rank] += 1
 
     def __repr__(self):
         if self.is_idle():
@@ -69,18 +69,18 @@ class ChimeraNode:
             type_str = "forward"
         else:
             type_str = "backward"
-        return f"ChimeraNode({type_str}, vdp_rank={self.virtual_data_parallel_rank}, microbatch={self.microbatch})"
+        return f"OmnipipeNode({type_str}, vdp_rank={self.virtual_data_parallel_rank}, microbatch={self.microbatch})"
     
     def is_idle(self):
-        return self.type == ChimeraNodeType.IDLE
+        return self.type == OmnipipeNodeType.IDLE
     
     def is_forward(self):
-        return self.type == ChimeraNodeType.FORWARD
+        return self.type == OmnipipeNodeType.FORWARD
     
     def is_backward(self):
-        return self.type == ChimeraNodeType.BACKWARD
+        return self.type == OmnipipeNodeType.BACKWARD
 
-class ChimeraAutoSchedule:
+class OmnipipeAutoSchedule:
     def __init__(
             self,
             rank: int = 0,
@@ -90,34 +90,34 @@ class ChimeraAutoSchedule:
             num_microbatches: int = None
         ):
         self.pipeline_model_parallel_world_size: int = pipeline_model_parallel_world_size
-        # chimera config
-        self.schedule_graph: Dict[str, List[ChimeraNode]] = {}
+        # omnipipe config
+        self.schedule_graph: Dict[str, List[OmnipipeNode]] = {}
         self.relative_rank: int = 0
         self.virtual_data_parallel_rank: int = 0
         self.virtual_data_parallel_size: int = virtual_data_parallel_size
         self.num_microbatches: int = num_microbatches
 
-        # chimera node config
+        # omnipipe node config
         if parallel_state is None:
             pipeline_rank = rank // (world_size // pipeline_model_parallel_world_size)
         else:
             pipeline_rank = parallel_state.get_pipeline_model_parallel_rank()
-        ChimeraNode.virtual_data_parallel_size = virtual_data_parallel_size
-        ChimeraNode.pipeline_model_parallel_world_size = pipeline_model_parallel_world_size
-        ChimeraNode.pipeline_rank = pipeline_rank
+        OmnipipeNode.virtual_data_parallel_size = virtual_data_parallel_size
+        OmnipipeNode.pipeline_model_parallel_world_size = pipeline_model_parallel_world_size
+        OmnipipeNode.pipeline_rank = pipeline_rank
         offset_unit = pipeline_model_parallel_world_size // (virtual_data_parallel_size // 2)
         is_dual_rank = False if ((pipeline_rank % offset_unit) < (offset_unit // 2)) else True
-        ChimeraNode.is_dual_rank = is_dual_rank
+        OmnipipeNode.is_dual_rank = is_dual_rank
         if is_dual_rank:
             self.relative_rank = (offset_unit - 1 - pipeline_rank % offset_unit)
-            # ChimeraNode.is_middle_rank = (self.relative_rank == (pipeline_model_parallel_world_size // virtual_data_parallel_size))
+            # OmnipipeNode.is_middle_rank = (self.relative_rank == (pipeline_model_parallel_world_size // virtual_data_parallel_size))
         else:
             self.relative_rank = pipeline_rank % offset_unit
-        ChimeraNode.is_middle_rank = (self.relative_rank == (pipeline_model_parallel_world_size // virtual_data_parallel_size - 1))
+        OmnipipeNode.is_middle_rank = (self.relative_rank == (pipeline_model_parallel_world_size // virtual_data_parallel_size - 1))
 
     def __schedule(self):
         """
-        Schedule the execution of the model across the Chimera pipeline.
+        Schedule the execution of the model across the Omnipipe pipeline.
         Note that this is only current rank's schedule.
         """
         num_microbatches_per_vdp = self.num_microbatches // self.virtual_data_parallel_size
@@ -137,10 +137,10 @@ class ChimeraAutoSchedule:
             n = (self.pipeline_model_parallel_world_size // self.virtual_data_parallel_size - self.relative_rank - 1) * 2
             num_microbatches_per_vdp = self.num_microbatches // self.virtual_data_parallel_size
             for i in range(min(n, num_microbatches_per_vdp)):
-                nodes.append(ChimeraNode(ChimeraNodeType.FORWARD, virtual_data_parallel_rank=0))
+                nodes.append(OmnipipeNode(OmnipipeNodeType.FORWARD, virtual_data_parallel_rank=0))
                 F_counts[0] -= 1
             for i in range((n - num_microbatches_per_vdp)):
-                nodes.append(ChimeraNode(ChimeraNodeType.IDLE, virtual_data_parallel_rank=0))
+                nodes.append(OmnipipeNode(OmnipipeNodeType.IDLE, virtual_data_parallel_rank=0))
             self.schedule_graph["F0"] = nodes
             return n
 
@@ -159,11 +159,11 @@ class ChimeraAutoSchedule:
             for _ in range(n):
                 # If the number of microbatch is below of 2 * pp - vdp_size, the F0F1 stage will be lack of F0 of vdp_0.
                 if F_counts[down_vdp_rank] > 0:
-                    nodes.append(ChimeraNode(ChimeraNodeType.FORWARD, virtual_data_parallel_rank=down_vdp_rank))
+                    nodes.append(OmnipipeNode(OmnipipeNodeType.FORWARD, virtual_data_parallel_rank=down_vdp_rank))
                     F_counts[down_vdp_rank] -= 1
                 else:
-                    nodes.append(ChimeraNode(ChimeraNodeType.IDLE, virtual_data_parallel_rank=down_vdp_rank))
-                nodes.append(ChimeraNode(ChimeraNodeType.FORWARD, virtual_data_parallel_rank=up_vdp_rank))
+                    nodes.append(OmnipipeNode(OmnipipeNodeType.IDLE, virtual_data_parallel_rank=down_vdp_rank))
+                nodes.append(OmnipipeNode(OmnipipeNodeType.FORWARD, virtual_data_parallel_rank=up_vdp_rank))
                 F_counts[up_vdp_rank] -= 1
 
                 down_count += 1
@@ -180,8 +180,8 @@ class ChimeraAutoSchedule:
             n = self.pipeline_model_parallel_world_size // self.virtual_data_parallel_size - 1 - self.relative_rank
             for _ in range(n):
                 B_vdp_rank = self.virtual_data_parallel_size // 2
-                nodes.append(ChimeraNode(ChimeraNodeType.BACKWARD, virtual_data_parallel_rank=B_vdp_rank))
-                nodes.append(ChimeraNode(ChimeraNodeType.FORWARD, virtual_data_parallel_rank=B_vdp_rank))
+                nodes.append(OmnipipeNode(OmnipipeNodeType.BACKWARD, virtual_data_parallel_rank=B_vdp_rank))
+                nodes.append(OmnipipeNode(OmnipipeNodeType.FORWARD, virtual_data_parallel_rank=B_vdp_rank))
                 F_counts[B_vdp_rank] -= 1
                 B_counts[B_vdp_rank] -= 1
             self.schedule_graph["B1F1"] = nodes
@@ -211,10 +211,10 @@ class ChimeraAutoSchedule:
                 # TODO
                 B_up_vdp_rank = get_dual_vdp_rank(down_vdp_rank)
                 B_down_vdp_rank = get_dual_vdp_rank(up_vdp_rank)
-                nodes.append(ChimeraNode(ChimeraNodeType.FORWARD, virtual_data_parallel_rank=down_vdp_rank))
-                nodes.append(ChimeraNode(ChimeraNodeType.BACKWARD, virtual_data_parallel_rank=B_up_vdp_rank))
-                nodes.append(ChimeraNode(ChimeraNodeType.FORWARD, virtual_data_parallel_rank=up_vdp_rank))
-                nodes.append(ChimeraNode(ChimeraNodeType.BACKWARD, virtual_data_parallel_rank=B_down_vdp_rank))
+                nodes.append(OmnipipeNode(OmnipipeNodeType.FORWARD, virtual_data_parallel_rank=down_vdp_rank))
+                nodes.append(OmnipipeNode(OmnipipeNodeType.BACKWARD, virtual_data_parallel_rank=B_up_vdp_rank))
+                nodes.append(OmnipipeNode(OmnipipeNodeType.FORWARD, virtual_data_parallel_rank=up_vdp_rank))
+                nodes.append(OmnipipeNode(OmnipipeNodeType.BACKWARD, virtual_data_parallel_rank=B_down_vdp_rank))
                 F_counts[down_vdp_rank] -= 1
                 F_counts[up_vdp_rank] -= 1
                 B_counts[B_up_vdp_rank] -= 1
@@ -249,22 +249,22 @@ class ChimeraAutoSchedule:
 
                 # if F_down > 0, insert a F_down
                 if F_counts[down_vdp_rank] > 0:
-                    nodes.append(ChimeraNode(ChimeraNodeType.FORWARD, virtual_data_parallel_rank=down_vdp_rank))
+                    nodes.append(OmnipipeNode(OmnipipeNodeType.FORWARD, virtual_data_parallel_rank=down_vdp_rank))
                     F_counts[down_vdp_rank] -= 1
                     rest_F -= 1
                 else:
-                    nodes.append(ChimeraNode(ChimeraNodeType.IDLE, virtual_data_parallel_rank=-1))
+                    nodes.append(OmnipipeNode(OmnipipeNodeType.IDLE, virtual_data_parallel_rank=-1))
                 # insert B_up
-                nodes.append(ChimeraNode(ChimeraNodeType.BACKWARD, virtual_data_parallel_rank=B_up_vdp_rank))
+                nodes.append(OmnipipeNode(OmnipipeNodeType.BACKWARD, virtual_data_parallel_rank=B_up_vdp_rank))
                 # if F_up > 0, insert a F_up
                 if F_counts[up_vdp_rank] > 0:
-                    nodes.append(ChimeraNode(ChimeraNodeType.FORWARD, virtual_data_parallel_rank=up_vdp_rank))
+                    nodes.append(OmnipipeNode(OmnipipeNodeType.FORWARD, virtual_data_parallel_rank=up_vdp_rank))
                     F_counts[up_vdp_rank] -= 1
                     rest_F -= 1
                 else:
-                    nodes.append(ChimeraNode(ChimeraNodeType.IDLE, virtual_data_parallel_rank=-1))
+                    nodes.append(OmnipipeNode(OmnipipeNodeType.IDLE, virtual_data_parallel_rank=-1))
                 # insert B_down
-                nodes.append(ChimeraNode(ChimeraNodeType.BACKWARD, virtual_data_parallel_rank=B_down_vdp_rank))
+                nodes.append(OmnipipeNode(OmnipipeNodeType.BACKWARD, virtual_data_parallel_rank=B_down_vdp_rank))
 
                 B_counts[B_up_vdp_rank] -= 1
                 B_counts[B_down_vdp_rank] -= 1
@@ -298,12 +298,12 @@ class ChimeraAutoSchedule:
                 nodes = []
 
                 if B_counts[B_up_vdp_rank] > 0:
-                    nodes.append(ChimeraNode(ChimeraNodeType.BACKWARD, virtual_data_parallel_rank=B_up_vdp_rank))
+                    nodes.append(OmnipipeNode(OmnipipeNodeType.BACKWARD, virtual_data_parallel_rank=B_up_vdp_rank))
                     B_counts[B_up_vdp_rank] -= 1
                     rest_B -= 1
                     dual_nodes += 1
                 if B_counts[B_down_vdp_rank] > 0:
-                    nodes.append(ChimeraNode(ChimeraNodeType.BACKWARD, virtual_data_parallel_rank=B_down_vdp_rank))
+                    nodes.append(OmnipipeNode(OmnipipeNodeType.BACKWARD, virtual_data_parallel_rank=B_down_vdp_rank))
                     B_counts[B_down_vdp_rank] -= 1
                     rest_B -= 1
                     dual_nodes += 1
@@ -331,7 +331,7 @@ class ChimeraAutoSchedule:
         down_count, down_vdp_rank, up_count, up_vdp_rank, micro_per_vdp = partial_F_down_B_up_F_up_B_down(down_count, down_vdp_rank, up_count, up_vdp_rank, micro_per_vdp)
         partial_B_up_B_down(down_count, down_vdp_rank, up_count, up_vdp_rank, micro_per_vdp)
 
-    def get_schedule(self) -> Dict[str, List[ChimeraNode]]:
+    def get_schedule(self) -> Dict[str, List[OmnipipeNode]]:
         self.__schedule()
         return self.schedule_graph
 
@@ -342,7 +342,7 @@ if __name__ == "__main__":
     num_microbatches = 12
     for rank in range(world_size):
         print("=" * 150)
-        ChimeraNode.forward_microbatch_count = {}
-        ChimeraNode.backward_microbatch_count = {}
-        scheduler = ChimeraAutoSchedule(rank, world_size, pipeline_model_parallel_world_size, virtual_data_parallel_size, num_microbatches)
+        OmnipipeNode.forward_microbatch_count = {}
+        OmnipipeNode.backward_microbatch_count = {}
+        scheduler = OmnipipeAutoSchedule(rank, world_size, pipeline_model_parallel_world_size, virtual_data_parallel_size, num_microbatches)
         print(f"rank {rank}: {scheduler.get_schedule()}")

@@ -867,8 +867,8 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             from megatron.core.pipeline_parallel.dualpipe import init_dualpipe_parallel_state
             init_dualpipe_parallel_state()
         else:
-            from megatron.core.pipeline_parallel.chimera import update_global_config_for_chimera
-            update_global_config_for_chimera(args)
+            from megatron.core.pipeline_parallel.omnipipe import update_global_config_for_omnipipe
+            update_global_config_for_omnipipe(args)
     # Build model.
     def build_model():
         if (

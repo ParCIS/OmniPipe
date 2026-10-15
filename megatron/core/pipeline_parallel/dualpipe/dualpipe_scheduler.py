@@ -9,7 +9,7 @@ from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.utils import get_attr_wrapped_model, get_model_config, get_model_type
 from megatron.core.tensor_parallel.weight_grad_store import WeightGradStore
 from .communication import set_p2p_tensor_dtype, set_p2p_tensor_shapes, append_isend, append_irecv
-from ..chimera.communication import get_pipeline_model_parallel_next_rank, get_pipeline_model_parallel_prev_rank, CommunicationManager
+from ..omnipipe.communication import get_pipeline_model_parallel_next_rank, get_pipeline_model_parallel_prev_rank, CommunicationManager
 logger = logging.getLogger(__name__)
 
 class DualPipeScheduler():
@@ -30,7 +30,7 @@ class DualPipeScheduler():
         first_val_step: Optional[bool] = None,
         adjust_tensor_shapes_fn: Optional[Callable] = None,  # unused
     ):
-        """Run chimera schedule (multiple pipeline per GPU).
+        """Run omnipipe schedule (multiple pipeline per GPU).
         Returns dictionary with losses if the last stage, empty dict otherwise.
         """
         # import here to avoid circle import
