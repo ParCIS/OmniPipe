@@ -26,11 +26,22 @@ OmniPipe is a bidirectional multi-pipeline parallelism framework for training **
 
 OmniPipe organizes pipeline replicas into forward and reverse directions. A shared cyclic schedule generates FB-blocks, and rank remapping assigns each logical pipeline to the appropriate local model replica. The execution progresses through warm-up, dual BF-blocks, stable FB-blocks, partial FB-blocks, and cool-down.
 
-<p align="center">
-  <img src="docs/assets/ep-overlap.png" alt="EP All-to-All communication overlapped with forward and backward computation in an OmniPipe FB-block" width="900">
-</p>
+<table>
+  <tr>
+    <td width="55%" align="center" valign="middle">
+      <img src="docs/assets/pipelines.png" alt="Comparison of pipeline schedules, including OmniPipe with two and four pipeline replicas" width="100%">
+    </td>
+    <td width="45%" align="center" valign="middle">
+      <img src="docs/assets/ep-overlap.png" alt="EP All-to-All communication overlapped with forward and backward computation in an OmniPipe FB-block" width="100%">
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><em>Pipeline schedule comparison.</em></td>
+    <td align="center"><em>EP communication overlap within an FB-block.</em></td>
+  </tr>
+</table>
 
-*EP communication overlap within an FB-block, reproduced from the paper. Blue and green denote forward and backward work from different micro-batches; dispatch and combine run on the communication stream.*
+*Figures reproduced from the paper. Left: OmniPipe reduces pipeline bubbles with configurable pipeline replicas. Right: blue and green denote forward and backward work from different micro-batches; dispatch and combine run on the communication stream.*
 
 The paper denotes the number of pipeline replicas by **VP**. In this implementation, it is configured with `--virtual-data-parallel-size`. This is distinct from Megatron's virtual pipeline stages, which split a model into interleaved chunks.
 
